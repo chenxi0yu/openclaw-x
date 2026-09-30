@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- flat fallback / splash background, matches the glass tile -->
+    <color name="ic_launcher_background">#FCFCFD</color>
+    <color name="splash_background">#F7F6F4</color>
+</resources>
