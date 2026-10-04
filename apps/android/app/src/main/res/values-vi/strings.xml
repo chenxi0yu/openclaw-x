@@ -1,5 +1,5 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <string name="app_name">OpenClaw</string>
+    <string name="app_name">OpenClawX</string>
     <string name="trust_this_gateway">Tin cậy cổng này?</string>
     <string name="trust_and_continue">Tin cậy và tiếp tục</string>
     <string name="cancel">Hủy</string>

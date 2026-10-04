@@ -6594,7 +6594,7 @@ class ChatController internal constructor(
           val messageText = parseAssistantDeltaText(payload)
           when {
             streamText != null -> updateStreamingAssistantText(runId, streamText)
-            !deltaText.isNullOrEmpty() -> {
+            deltaText != null -> {
               if (replace) updateStreamingAssistantText(runId, deltaText) else appendStreamingAssistantDelta(runId, deltaText)
             }
             messageText != null -> updateStreamingAssistantText(runId, messageText)
@@ -7065,10 +7065,11 @@ class ChatController internal constructor(
       "assistant" -> {
         val text = data?.get("text")?.asStringOrNull()
         val delta = data?.get("delta")?.asStringOrNull()
-        if (!text.isNullOrEmpty()) {
+        val replace = data?.get("replace")?.asBooleanOrNull() == true
+        if (text != null) {
           updateStreamingAssistantText(runId, text)
-        } else if (!delta.isNullOrEmpty()) {
-          appendStreamingAssistantDelta(runId, delta)
+        } else if (delta != null) {
+          if (replace) updateStreamingAssistantText(runId, delta) else appendStreamingAssistantDelta(runId, delta)
         }
       }
 

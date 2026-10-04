@@ -90,7 +90,7 @@ internal object ClawGlassMenuDefaults {
   // one family of glass surfaces.
   val CornerRadius: Dp = 26.dp
   val ItemHeight: Dp = 40.dp
-  val ItemShapeRadius: Dp = 11.dp
+  val ItemShapeRadius: Dp = CornerRadius
   /** Backdrop blur strength. Big enough that text behind the card stops being readable. */
   val BlurRadius: Dp = 32.dp
   /**

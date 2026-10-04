@@ -1,5 +1,5 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <string name="app_name">OpenClaw</string>
+    <string name="app_name">OpenClawX</string>
     <string name="trust_this_gateway">Bu ağ geçidine güvenilsin mi?</string>
     <string name="trust_and_continue">Güven ve devam et</string>
     <string name="cancel">İptal</string>

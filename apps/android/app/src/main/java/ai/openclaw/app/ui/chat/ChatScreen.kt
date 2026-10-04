@@ -116,6 +116,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -279,6 +280,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
@@ -474,6 +476,14 @@ internal fun ChatScreen(
   val gatewayProblemMessage = gatewayConnectionDisplay.problem?.message?.takeIf { it.isNotBlank() }
   val offlineStatus = gatewayStatusForDisplay(gatewayProblemMessage ?: gatewayConnectionDisplay.statusText)
   val gatewayOffline = !gatewayConnectionDisplay.isConnected
+  var showOfflineNotice by remember(activeGatewayStableId) { mutableStateOf(false) }
+  LaunchedEffect(gatewayOffline, activeGatewayStableId) {
+    showOfflineNotice = false
+    if (gatewayOffline) {
+      delay(10_000L)
+      showOfflineNotice = true
+    }
+  }
   val effectiveGatewayDefaultAgentId =
     resolveGatewayDefaultAgentId(activeGatewayStableId, gatewayDefaultAgentId, gatewayComposerDefaultAgentOwner)
   val sessionAgentId = resolveAgentIdFromMainSessionKey(sessionKey) ?: sessionOwnerAgentId ?: effectiveGatewayDefaultAgentId ?: "main"
@@ -1168,6 +1178,7 @@ internal fun ChatScreen(
       },
       healthOk = healthOk,
       gatewayOffline = gatewayOffline,
+      showOfflineNotice = showOfflineNotice,
       offlineStatus = offlineStatus,
       pendingRunCount = pendingRunCount,
       shareStaging = shareStaging,
@@ -2161,7 +2172,8 @@ private fun ChatMessageList(
             ClawJumpToLatestButton(
               visible = readerScroll.showJumpToLatest && !readerScroll.scrolling,
               onClick = readerScroll.jumpToLatest,
-              modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp),
+              modifier =
+                Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp + minimumChatInputHeight()),
             )
           }
         }
@@ -3667,6 +3679,7 @@ private fun ChatComposer(
   onOpenModelProviders: (String) -> Unit,
   healthOk: Boolean,
   gatewayOffline: Boolean,
+  showOfflineNotice: Boolean,
   offlineStatus: String,
   pendingRunCount: Int,
   shareStaging: Boolean,
@@ -3783,7 +3796,7 @@ private fun ChatComposer(
     if (recordVoiceNoteEnabled && (dictationState as? ChatDictationState.Failure)?.reason == ChatDictationFailure.Unavailable) {
       TextButton(onClick = onStartVoiceNote) { Text(voiceNoteRecordLabel()) }
     }
-    if (!healthOk && gatewayOffline) {
+    if (!healthOk && gatewayOffline && showOfflineNotice) {
       ChatOfflineNotice(
         status = offlineStatus,
         onFixConnection = onFixConnection,
@@ -3845,6 +3858,7 @@ private fun ChatComposer(
             talkActive = talkActive,
             onToggleTalk = onToggleTalk,
             runActive = pendingRunCount > 0,
+            connectionPending = gatewayOffline && !showOfflineNotice,
             sendInFlight = sendInFlight,
             onAbort = onAbort,
             hasContent = hasContent,
@@ -4755,6 +4769,7 @@ internal fun canSelectChatPermissionMode(
 @Composable
 private fun ChatInputPill(
   inputEnabled: Boolean,
+  connectionPending: Boolean,
   onOpenDetails: (() -> Unit)?,
   value: String,
   onValueChange: (String) -> Unit,
@@ -4854,7 +4869,26 @@ private fun ChatInputPill(
             Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
               if (value.isEmpty()) {
                 // BasicTextField's line limit does not constrain its decoration.
-                Text(text = nativeString("Message OpenClaw"), style = draftStyle, color = ClawTheme.colors.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                AnimatedContent(
+                  targetState = connectionPending,
+                  transitionSpec = {
+                    fadeIn(animationSpec = tween(180)) togetherWith fadeOut(animationSpec = tween(180))
+                  },
+                  label = "connection-placeholder",
+                ) { pending ->
+                  if (pending) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      CircularProgressIndicator(
+                        modifier = Modifier.size(12.dp),
+                        strokeWidth = 1.5.dp,
+                        color = ClawTheme.colors.textMuted,
+                      )
+                      Text(text = nativeString("Connecting…"), style = draftStyle, color = ClawTheme.colors.textMuted, maxLines = 1)
+                    }
+                  } else {
+                    Text(text = nativeString("Message OpenClaw"), style = draftStyle, color = ClawTheme.colors.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                  }
+                }
               }
               innerTextField()
             }

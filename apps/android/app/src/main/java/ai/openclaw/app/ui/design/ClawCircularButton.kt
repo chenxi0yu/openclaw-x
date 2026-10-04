@@ -55,10 +55,10 @@ internal object ClawCircularButtonDefaults {
  * highlight gradient adds the "raised" feel. No RenderEffect / hazeBlur —
  * those crash `libhwui` on emulators and aren't worth it for a 48dp target.
  */
-private fun Modifier.glassButtonBackground(dark: Boolean): Modifier =
+private fun Modifier.glassButtonBackground(dark: Boolean, surfaceRaised: Color): Modifier =
   this
     .background(
-      if (dark) Color.White.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.72f),
+      surfaceRaised,
     )
     .background(
       Brush.verticalGradient(
@@ -100,7 +100,7 @@ internal fun ClawCircularIconButton(
           clip = false,
         )
         .clip(CircleShape)
-        .glassButtonBackground(dark)
+        .glassButtonBackground(dark, colors.surfaceRaised)
         .then(
           if (enabled) {
             Modifier.clickable(role = Role.Button) {
@@ -198,7 +198,7 @@ internal fun ClawCapsuleIconButton(
           clip = false,
         )
         .clip(pillShape)
-        .glassButtonBackground(dark),
+        .glassButtonBackground(dark, colors.surfaceRaised),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     // Left icon
