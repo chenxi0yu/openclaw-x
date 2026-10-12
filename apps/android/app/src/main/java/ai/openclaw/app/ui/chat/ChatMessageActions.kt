@@ -3,9 +3,10 @@ package ai.openclaw.app.ui.chat
 import ai.openclaw.app.R
 import ai.openclaw.app.chat.ChatMessageContent
 import ai.openclaw.app.i18n.nativeString
-import ai.openclaw.app.ui.design.ClawGlassMenu
 import ai.openclaw.app.ui.design.ClawGlassMenuItem
 import ai.openclaw.app.ui.design.ClawIconButton
+import ai.openclaw.app.ui.design.clawMorphTrigger
+import ai.openclaw.app.ui.design.LocalClawMorphMenuHost
 import ai.openclaw.app.ui.design.ClawTheme
 import ai.openclaw.app.ui.design.rememberClawHaptics
 import android.app.Activity
@@ -51,11 +52,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.chrisbanes.haze.HazeState
@@ -102,80 +107,98 @@ internal fun ChatMessageActionHost(
 
   val context = LocalContext.current
   val haptics = rememberClawHaptics()
-  var menuExpanded by remember { mutableStateOf(false) }
-  // Where the long press landed, inside this bubble. The menu opens there
-  // instead of at a fixed corner of the row, so a long press on a tall reply
-  // still has the card under the finger.
-  var pressPoint by remember { mutableStateOf<Offset?>(null) }
+
+  val bubbleTrigger = clawMorphTrigger(LocalClawMorphMenuHost.current)
   var selectText by remember { mutableStateOf(false) }
+  val screenDensity = LocalDensity.current
+  val screen = LocalConfiguration.current
+  val screenWidthPx = with(screenDensity) { screen.screenWidthDp.dp.toPx() }
+  val screenHeightPx = with(screenDensity) { screen.screenHeightDp.dp.toPx() }
+
+  val menuContent: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit = {
+    if (text.isNotBlank()) {
+      onToggleListen?.let { toggleListen ->
+        ClawGlassMenuItem(
+          label = if (listenActive) nativeString("Stop") else nativeString("Listen"),
+          icon = if (listenActive) Icons.Default.Stop else Icons.AutoMirrored.Filled.VolumeUp,
+          onClick = toggleListen,
+        )
+      }
+      ClawGlassMenuItem(
+        label = nativeString("Copy"),
+        icon = Icons.Default.ContentCopy,
+        onClick = { copyChatText(context, text) },
+      )
+      ClawGlassMenuItem(
+        label = nativeString("Select text"),
+        icon = Icons.Default.TextFields,
+        onClick = { selectText = true },
+      )
+      ClawGlassMenuItem(
+        label = nativeString("Share"),
+        icon = Icons.Default.Share,
+        onClick = { shareChatMessage(context, text) },
+      )
+      ClawGlassMenuItem(
+        label = nativeString("Reply"),
+        icon = Icons.AutoMirrored.Filled.Reply,
+        onClick = { onReply(quoteChatMessage(text)) },
+      )
+    }
+    if (showSessionActions) {
+      onRewind?.let { rewind ->
+        ClawGlassMenuItem(
+          label = nativeString("Rewind to here"),
+          icon = Icons.Default.History,
+          onClick = rewind,
+        )
+      }
+      onFork?.let { fork ->
+        ClawGlassMenuItem(
+          label = nativeString("Fork from here"),
+          icon = Icons.AutoMirrored.Filled.CallSplit,
+          onClick = fork,
+        )
+      }
+    }
+  }
 
   Box(
     modifier =
-      modifier.pointerInput(Unit) {
-        detectTapGestures(
-          onLongPress = { offset ->
-            haptics.longPress()
-            pressPoint = offset
-            menuExpanded = true
-          },
-        )
-      },
+      modifier
+        .then(bubbleTrigger.anchorModifier)
+        .pointerInput(Unit) {
+          detectTapGestures(
+            onLongPress = { offset ->
+              haptics.longPress()
+              // The glass grows out of the spot under the finger, so a long press
+              // on a tall reply still puts the card where it was pressed. There is
+              // no popup left to reposition it, so clamp it into the viewport
+              // here: right-aligned user bubbles would otherwise push the card off
+              // the right edge, and a press near the bottom off the top.
+              val finger = bubbleTrigger.anchor?.topLeft?.plus(offset) ?: return@detectTapGestures
+              val edge = with(screenDensity) { 12.dp.toPx() }
+              val panelW = with(screenDensity) { 200.dp.toPx() }
+              val lastHeight = bubbleTrigger.state.panelHeightPx.toFloat()
+              val estH =
+                if (lastHeight > 0f) lastHeight else with(screenDensity) { 220.dp.toPx() }
+              // Pin the card's top-left just off the finger, then keep the whole
+              // card inside the viewport: a right-aligned user bubble presses near
+              // the right edge, where the card would otherwise run off screen.
+              val left = (finger.x - edge).coerceIn(edge, (screenWidthPx - edge - panelW).coerceAtLeast(edge))
+              val top = (finger.y - edge).coerceIn(edge, (screenHeightPx - edge - estH).coerceAtLeast(edge))
+              val blob = with(screenDensity) { 44.dp.toPx() }
+              bubbleTrigger.open(
+                origin = TransformOrigin(0f, 0f),
+                panelWidth = 200.dp,
+                overrideAnchor = Rect(left, top, left + blob, top + blob),
+                content = menuContent,
+              )
+            },
+          )
+        },
   ) {
     content()
-    ClawGlassMenu(
-      expanded = menuExpanded,
-      onDismissRequest = { menuExpanded = false },
-      hazeState = hazeState,
-      pressOffset = pressPoint,
-      // Clears the bubble's own edge so the card does not sit on the text.
-      offset = DpOffset(0.dp, 4.dp),
-    ) {
-      if (text.isNotBlank()) {
-        onToggleListen?.let { toggleListen ->
-          ClawGlassMenuItem(
-            label = if (listenActive) nativeString("Stop") else nativeString("Listen"),
-            icon = if (listenActive) Icons.Default.Stop else Icons.AutoMirrored.Filled.VolumeUp,
-            onClick = toggleListen,
-          )
-        }
-        ClawGlassMenuItem(
-          label = nativeString("Copy"),
-          icon = Icons.Default.ContentCopy,
-          onClick = { copyChatText(context, text) },
-        )
-        ClawGlassMenuItem(
-          label = nativeString("Select text"),
-          icon = Icons.Default.TextFields,
-          onClick = { selectText = true },
-        )
-        ClawGlassMenuItem(
-          label = nativeString("Share"),
-          icon = Icons.Default.Share,
-          onClick = { shareChatMessage(context, text) },
-        )
-        ClawGlassMenuItem(
-          label = nativeString("Reply"),
-          icon = Icons.AutoMirrored.Filled.Reply,
-          onClick = { onReply(quoteChatMessage(text)) },
-        )
-      }
-      if (showSessionActions) {
-        onRewind?.let { rewind ->
-          ClawGlassMenuItem(
-            label = nativeString("Rewind to here"),
-            icon = Icons.Default.History,
-            onClick = rewind,
-          )
-        }
-        onFork?.let { fork ->
-          ClawGlassMenuItem(
-            label = nativeString("Fork from here"),
-            icon = Icons.AutoMirrored.Filled.CallSplit,
-            onClick = fork,
-          )
-        }
-      }
-    }
   }
 
   if (selectText) {

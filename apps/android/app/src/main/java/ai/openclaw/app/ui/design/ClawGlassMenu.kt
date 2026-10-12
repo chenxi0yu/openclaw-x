@@ -32,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -90,6 +91,8 @@ internal object ClawGlassMenuDefaults {
   // one family of glass surfaces.
   val CornerRadius: Dp = 26.dp
   val ItemHeight: Dp = 40.dp
+  // Selected rows use the same capsule silhouette as the floating card so the
+  // tinted selection does not read as a separate, tighter nested surface.
   val ItemShapeRadius: Dp = CornerRadius
   /** Backdrop blur strength. Big enough that text behind the card stops being readable. */
   val BlurRadius: Dp = 32.dp
@@ -137,6 +140,14 @@ internal object ClawGlassMenuDefaults {
  * which closes the menu before running the caller's action.
  */
 internal val LocalClawGlassMenuDismiss = staticCompositionLocalOf<() -> Unit> { {} }
+
+/**
+ * Whether items in this menu should accept taps. `true` everywhere except the
+ * morph menu's collapse animation: the overlay stays mounted while the exit
+ * springs settle, and its now-invisible items would otherwise swallow taps
+ * aimed at the trigger capsule underneath.
+ */
+internal val LocalClawGlassMenuInteractive = compositionLocalOf { true }
 
 /**
  * A rounded-rectangle floating menu anchored to the composable it is called from.
@@ -318,10 +329,6 @@ internal fun ClawGlassSurface(
   val backdrop = hazeState ?: LocalClawHazeState.current
   val shape = RoundedCornerShape(cornerRadius)
   val fill = if (dark) colors.surfaceRaised else Color.White
-  val outerStroke = if (dark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.08f)
-  // Hairline-bright edge highlight: thin stroke, restrained alpha. The previous
-  // wide bright stroke read as a fat glowing rim rather than a bevel.
-  val highlight = if (dark) Color.White.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.45f)
   val blurStyle = rememberClawGlassBlurStyle(
     dark = dark,
     fill = fill,
@@ -348,7 +355,7 @@ internal fun ClawGlassSurface(
               )
           },
         )
-        .clawGlassEdge(cornerRadius = cornerRadius, outer = outerStroke, highlight = highlight)
+        .clawGlassEdge(cornerRadius = cornerRadius, dark = dark)
         .padding(contentPadding),
     content = content,
   )
@@ -405,13 +412,22 @@ private fun rememberClawGlassBlurStyle(
 /**
  * Draws the two strokes that lift the card off the canvas: a hairline on the
  * silhouette and a brighter inner highlight concentrated near the top edge.
+ *
+ * Every glass surface in the app shares these values, so the palette is derived
+ * from `dark` here rather than passed in: a caller that picks its own rim stops
+ * reading as part of the family. Place it *after* whatever paints the surface
+ * in the modifier chain — `drawBehind` puts the strokes under the rest of the
+ * chain, so before a `drawBackdrop` they would end up under the glass.
  */
-private fun Modifier.clawGlassEdge(
+internal fun Modifier.clawGlassEdge(
   cornerRadius: Dp,
-  outer: Color,
-  highlight: Color,
+  dark: Boolean,
 ): Modifier =
   drawBehind {
+    val outer = if (dark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.08f)
+    // Hairline-bright edge highlight: thin stroke, restrained alpha. The previous
+    // wide bright stroke read as a fat glowing rim rather than a bevel.
+    val highlight = if (dark) Color.White.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.45f)
     val outerWidth = 1.dp.toPx()
     drawRoundRect(
       color = outer,
@@ -451,6 +467,7 @@ internal fun ClawGlassMenuItem(
 ) {
   val colors = ClawTheme.colors
   val dismissMenu = LocalClawGlassMenuDismiss.current
+  val interactive = LocalClawGlassMenuInteractive.current
   val contentColor =
     when {
       !enabled -> colors.textSubtle
@@ -459,6 +476,26 @@ internal fun ClawGlassMenuItem(
       else -> colors.text
     }
   val shape = RoundedCornerShape(ClawGlassMenuDefaults.ItemShapeRadius)
+  // `interactive` removes the clickable modifier entirely rather than passing
+  // `enabled = false`: a disabled `clickable` still installs a pointer-input
+  // node and still consumes the down event, so rows of a morph overlay that is
+  // animating shut would eat taps aimed at the trigger capsule underneath and
+  // the collapse could never be interrupted. Nexio avoids the whole class of
+  // problem by giving its rows no clickable at all and letting one panel-level
+  // gesture own every touch.
+  val rowClick: Modifier =
+    if (interactive) {
+      Modifier.clickable(
+        enabled = enabled,
+        role = Role.Button,
+        onClick = {
+          dismissMenu()
+          onClick()
+        },
+      )
+    } else {
+      Modifier
+    }
   Row(
     modifier =
       Modifier
@@ -467,14 +504,8 @@ internal fun ClawGlassMenuItem(
         .padding(horizontal = 6.dp)
         .clip(shape)
         .background(if (selected) colors.accentSoft else Color.Transparent)
-        .clickable(
-          enabled = enabled,
-          role = Role.Button,
-          onClick = {
-            dismissMenu()
-            onClick()
-          },
-        ).padding(horizontal = 12.dp, vertical = 9.dp),
+        .then(rowClick)
+        .padding(horizontal = 12.dp, vertical = 9.dp),
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(12.dp),
   ) {

@@ -20,6 +20,20 @@ import org.junit.Test
 
 class ChatScreenTest {
   @Test
+  fun transientGatewayConnectionStatusesUseTheInlineComposerState() {
+    assertTrue(isTransientGatewayConnectionStatus("Connecting…"))
+    assertTrue(isTransientGatewayConnectionStatus("Reconnecting…"))
+    assertFalse(isTransientGatewayConnectionStatus("Offline"))
+    assertFalse(isTransientGatewayConnectionStatus("Gateway connection timed out"))
+  }
+
+  @Test
+  fun offlineGracePeriodDoesNotDependOnChangingStatusText() {
+    assertTrue(shouldKeepGatewayOfflineNoticeInline(isNetworkFailure = true))
+    assertFalse(shouldKeepGatewayOfflineNoticeInline(isNetworkFailure = false))
+  }
+
+  @Test
   fun thinkingGaugeSemanticsExposeEffortAndFastModeState() {
     val options = listOf("off", "medium").map { ChatThinkingLevelOption(id = it, label = it) }
 

@@ -65,6 +65,11 @@ import ai.openclaw.app.ui.design.ClawCircularButtonDefaults
 import ai.openclaw.app.ui.design.ClawCircularIconButton
 import ai.openclaw.app.ui.design.ClawGlassMenu
 import ai.openclaw.app.ui.design.ClawGlassMenuItem
+import ai.openclaw.app.ui.design.ClawMorphMenuDefaults
+import ai.openclaw.app.ui.design.ClawMorphMenuOverlay
+import ai.openclaw.app.ui.design.ClawMorphMenuState
+import ai.openclaw.app.ui.design.LocalClawMorphMenuHost
+import ai.openclaw.app.ui.design.rememberClawMorphMenuState
 import ai.openclaw.app.ui.design.ClawGlassSurface
 import ai.openclaw.app.ui.design.ClawJumpToLatestButton
 import ai.openclaw.app.ui.design.ClawListItem
@@ -86,7 +91,11 @@ import ai.openclaw.app.ui.design.ProviderBrandIcon
 import ai.openclaw.app.ui.design.agentAvatarSource
 import ai.openclaw.app.ui.design.rememberClawHaptics
 import ai.openclaw.app.ui.design.sessionColor
-import ai.openclaw.app.ui.design.clawTopBarGlass
+import ai.openclaw.app.ui.design.clawBackdropTopBar
+import ai.openclaw.app.ui.design.ClawMorphTrigger
+import ai.openclaw.app.ui.design.clawMorphTrigger
+import ai.openclaw.app.ui.design.rememberClawMorphTrigger
+import ai.openclaw.app.ui.design.rememberClawBackdrop
 import ai.openclaw.app.ui.foldAwareSheet
 import ai.openclaw.app.ui.gatewayDiagnosticsEndpoint
 import ai.openclaw.app.ui.gatewayStatusForDisplay
@@ -115,8 +124,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -226,6 +236,8 @@ import androidx.compose.ui.Modifier
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import com.kyant.backdrop.Backdrop
+import com.kyant.backdrop.backdrops.layerBackdrop
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
@@ -235,6 +247,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -243,6 +256,7 @@ import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.input.key.onPreInterceptKeyBeforeSoftKeyboard
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -270,7 +284,9 @@ import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
@@ -280,7 +296,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
@@ -476,14 +491,23 @@ internal fun ChatScreen(
   val gatewayProblemMessage = gatewayConnectionDisplay.problem?.message?.takeIf { it.isNotBlank() }
   val offlineStatus = gatewayStatusForDisplay(gatewayProblemMessage ?: gatewayConnectionDisplay.statusText)
   val gatewayOffline = !gatewayConnectionDisplay.isConnected
+  val gatewayRequiresImmediateOfflineNotice =
+    gatewayConnectionDisplay.problem?.let { !shouldKeepGatewayOfflineNoticeInline(it.isNetworkFailure) } == true
   var showOfflineNotice by remember(activeGatewayStableId) { mutableStateOf(false) }
-  LaunchedEffect(gatewayOffline, activeGatewayStableId) {
-    showOfflineNotice = false
-    if (gatewayOffline) {
-      delay(10_000L)
+  LaunchedEffect(activeGatewayStableId, gatewayOffline, gatewayRequiresImmediateOfflineNotice) {
+    if (!gatewayOffline) {
+      showOfflineNotice = false
+    } else if (gatewayRequiresImmediateOfflineNotice) {
       showOfflineNotice = true
+    } else {
+      showOfflineNotice = false
+      delay(CHAT_OFFLINE_NOTICE_DELAY_MS)
+      if (gatewayOffline) {
+        showOfflineNotice = true
+      }
     }
   }
+  val gatewayConnecting = gatewayOffline && !showOfflineNotice && !gatewayRequiresImmediateOfflineNotice
   val effectiveGatewayDefaultAgentId =
     resolveGatewayDefaultAgentId(activeGatewayStableId, gatewayDefaultAgentId, gatewayComposerDefaultAgentOwner)
   val sessionAgentId = resolveAgentIdFromMainSessionKey(sessionKey) ?: sessionOwnerAgentId ?: effectiveGatewayDefaultAgentId ?: "main"
@@ -963,6 +987,77 @@ internal fun ChatScreen(
   // the sidebar's session menu blurs the sidebar. Declared above `headerContent`
   // because that lambda captures it.
   val chatHazeState = rememberHazeState()
+  val chatBackdrop = rememberClawBackdrop()
+  // Actions menu state lives here, not in ChatHeader: the overlay that draws the
+  // morphing glass is a sibling of the header. The trigger carries the capsule's
+  // bounds and the glide, so ChatHeader just applies `modifier`.
+  val actionsMenu = rememberClawMorphMenuState()
+  val actionsTrigger = rememberClawMorphTrigger(actionsMenu)
+  var annotationTarget by remember { mutableStateOf<AttachmentAnnotationTarget?>(null) }
+  // The header's branch-switcher action, hoisted here because the morph menu
+  // (a sibling overlay, not part of the header) needs the same behavior.
+  val openBranchSwitcherMenu = {
+    if (viewModel.isCurrentChatBranchTarget(composerOwner, selectionGeneration)) {
+      val previous = branchPicker.visible
+      branchPicker.open(composerOwner, sessionKey)
+      branchPicker.visible?.takeIf { it !== previous && !it.geometry.revoked }?.let { session ->
+        val opening = ChatBranchOpening(session, selectionGeneration)
+        branchOpening = opening
+        // Reads can start before placement; admitted operations outlive the keyed sheet.
+        scope.launch {
+          if (isCurrentBranchOpening(opening)) viewModel.refreshChatSessionBranches()
+        }
+      }
+    }
+  }
+  // The actions capsule's menu body. It is claimed into the shared morph host
+  // rather than rendered in place, because the glass has to be drawn by the
+  // pane-level overlay above everything it covers.
+  val actionsMenuContent: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit = {
+    val newChatInWorktreeMenuLabel = stringResource(R.string.new_chat_in_worktree)
+    ClawGlassMenuItem(
+      label = nativeString("Refresh chat"),
+      icon = Icons.Default.Refresh,
+      onClick = { viewModel.refreshChat(); viewModel.refreshChatSessions(limit = 100) },
+    )
+    if (sessionBranches.size > 1) {
+      ClawGlassMenuItem(
+        label = nativeString("Switch branch"),
+        icon = Icons.Default.ArrowDropDown,
+        enabled = viewModel.isCurrentChatBranchTarget(composerOwner, selectionGeneration),
+        onClick = {
+          detailsExpanded = false
+          openBranchSwitcherMenu()
+        },
+      )
+    }
+    ClawGlassMenuItem(
+      label = nativeString("Dashboard"),
+      icon = Icons.Default.Dashboard,
+      onClick = {
+        detailsExpanded = false
+        onOpenDashboard(sessionKey)
+      },
+    )
+    ClawGlassMenuItem(
+      label = nativeString("Background tasks"),
+      icon = Icons.Default.HourglassEmpty,
+      onClick = {
+        detailsExpanded = false
+        backgroundTasks.open(composerOwner, sessionKey)
+      },
+    )
+    if (workspaceGit) {
+      ClawGlassMenuItem(
+        label = newChatInWorktreeMenuLabel,
+        enabled = newChatEnabled,
+        onClick = {
+          detailsExpanded = false
+          startNewChat(true)
+        },
+      )
+    }
+  }
   val headerContent: @Composable (() -> Unit) -> Unit = { dismissDetails ->
     ChatHeader(
       activeAgent = activeAgent,
@@ -982,41 +1077,13 @@ internal fun ChatScreen(
       pendingRunCount = pendingRunCount,
       sessionCreating = sessionCreating,
       newChatEnabled = newChatEnabled,
-      workspaceGit = workspaceGit,
-      branches = sessionBranches,
-      branchSwitchEnabled = viewModel.isCurrentChatBranchTarget(composerOwner, selectionGeneration),
-      onNewChatInWorktree = {
-        dismissDetails()
-        startNewChat(true)
+      actionsMenuExpanded = actionsMenu.expanded,
+      onActionsMenuExpandedChange = { expanded ->
+        if (expanded) actionsTrigger.open(content = actionsMenuContent) else actionsMenu.dismiss()
       },
-      onRefresh = {
-        viewModel.refreshChat()
-        viewModel.refreshChatSessions(limit = 100)
-      },
-      onOpenDashboard = {
-        dismissDetails()
-        onOpenDashboard(sessionKey)
-      },
-      onOpenBackgroundTasks = {
-        dismissDetails()
-        backgroundTasks.open(composerOwner, sessionKey)
-      },
-      onOpenBranchSwitcher = {
-        dismissDetails()
-        if (viewModel.isCurrentChatBranchTarget(composerOwner, selectionGeneration)) {
-          val previous = branchPicker.visible
-          branchPicker.open(composerOwner, sessionKey)
-          branchPicker.visible?.takeIf { it !== previous && !it.geometry.revoked }?.let { session ->
-            val opening = ChatBranchOpening(session, selectionGeneration)
-            branchOpening = opening
-            // Reads can start before placement; admitted operations outlive the keyed sheet.
-            scope.launch {
-              if (isCurrentBranchOpening(opening)) viewModel.refreshChatSessionBranches()
-            }
-          }
-        }
-      },
+      morphTrigger = actionsTrigger,
       hazeState = chatHazeState,
+      backdrop = chatBackdrop,
     )
   }
   val conversationStatus: @Composable () -> Unit = {
@@ -1037,6 +1104,7 @@ internal fun ChatScreen(
     )
   }
   ChatMessageList(
+    morphHost = actionsMenu,
     sessionKey = sessionKey,
     fullMessageOwner = composerOwner,
     selectionGeneration = selectionGeneration,
@@ -1118,9 +1186,25 @@ internal fun ChatScreen(
     // The header floats over the transcript, so only the body below it may be a
     // haze source: sampling is done from the body, the header is its sibling.
     modifier = Modifier.fillMaxSize().imePadding(),
+    headerModifier = Modifier.clawBackdropTopBar(chatBackdrop),
+    // Haze stays scoped to the transcript: its effects live inside that subtree
+    // and Haze forbids blurring an ancestor source.
     bodyModifier = Modifier.hazeSource(chatHazeState),
-    headerModifier = Modifier.clawTopBarGlass(chatHazeState),
+    // The liquid-glass backdrop needs the whole pane (down to window y=0) or the
+    // strip above the source's top edge samples empty and bands under the
+    // status bar. Canvas fill first so the capture is never transparent.
+    backdropSourceModifier =
+      Modifier
+        .layerBackdrop(chatBackdrop)
+        .background(ClawTheme.colors.canvas),
     hazeState = chatHazeState,
+    overlay = {
+      ClawMorphMenuOverlay(
+        state = actionsMenu,
+        onDismissRequest = actionsMenu::dismiss,
+        backdrop = chatBackdrop,
+      )
+    },
     tabletopPanes = tabletopPanes,
     features = features,
     conversationStatus = conversationStatus,
@@ -1178,6 +1262,7 @@ internal fun ChatScreen(
       },
       healthOk = healthOk,
       gatewayOffline = gatewayOffline,
+      gatewayConnecting = gatewayConnecting,
       showOfflineNotice = showOfflineNotice,
       offlineStatus = offlineStatus,
       pendingRunCount = pendingRunCount,
@@ -1236,6 +1321,9 @@ internal fun ChatScreen(
         }
       },
       onRemoveAttachment = { id -> composerState.removeAttachments(composerOwner, setOf(id)) },
+      onAnnotateAttachment = { attachment, chipBounds ->
+        annotationTarget = AttachmentAnnotationTarget(attachment, chipBounds)
+      },
       voiceNoteState = voiceNoteState,
       voiceNoteElapsedMs = voiceNoteElapsedMs,
       voiceNoteLevel = voiceNoteLevel,
@@ -1331,6 +1419,22 @@ internal fun ChatScreen(
         sendCheckpointFull = result == ChatComposerSendStartResult.CheckpointFull
       },
       hazeState = chatHazeState,
+    )
+  }
+
+  annotationTarget?.let { target ->
+    AttachmentAnnotationOverlay(
+      attachment = target.attachment,
+      chipBounds = target.chipBounds,
+      hazeState = chatHazeState,
+      onConfirm = { annotatedBase64 ->
+        val updated =
+          attachments.map { attachment ->
+            if (attachment.id == target.attachment.id) attachment.copy(base64 = annotatedBase64) else attachment
+          }
+        composerState.replaceAttachments(composerOwner, updated)
+      },
+      onDismiss = { annotationTarget = null },
     )
   }
 
@@ -1521,20 +1625,22 @@ private fun ChatHeader(
   healthOk: Boolean,
   pendingRunCount: Int,
   sessionCreating: Boolean,
+  /** Gates the capsule's new-chat half; the actions half is always live. */
   newChatEnabled: Boolean,
-  workspaceGit: Boolean,
-  branches: List<SessionBranch>,
-  branchSwitchEnabled: Boolean,
-  onNewChatInWorktree: () -> Unit,
-  onRefresh: () -> Unit,
-  onOpenDashboard: () -> Unit,
-  onOpenBackgroundTasks: () -> Unit,
-  onOpenBranchSwitcher: () -> Unit,
   /** Backdrop the actions menu blurs: the chat transcript. */
   hazeState: HazeState? = null,
+  backdrop: Backdrop? = null,
+  /** Expanded state of the actions morph menu; owned by the ChatScreen overlay. */
+  actionsMenuExpanded: Boolean = false,
+  onActionsMenuExpandedChange: (Boolean) -> Unit = {},
+  /**
+   * Drives the actions morph menu: publishes the capsule's bounds and glides it
+   * toward the growing panel while fading, so the swap reads as one continuous
+   * element instead of two crossfading cards. Null only in previews that render
+   * the header outside a chat pane.
+   */
+  morphTrigger: ClawMorphTrigger? = null,
 ) {
-  var actionsMenuExpanded by remember { mutableStateOf(false) }
-  val newChatInWorktreeLabel = stringResource(R.string.new_chat_in_worktree)
   val statusLabel =
     when {
       sessionCreating -> nativeString("Loading")
@@ -1567,7 +1673,9 @@ private fun ChatHeader(
           // `headerReserve` (= measured height + gap) grows by the same amount
           // and the transcript clears the bar by a comfortable margin instead
           // of hiding its first message underneath it.
-          bottom = 28.dp,
+          // Extend the glass beyond the content row so its lower fade is
+          // gradual instead of ending at the first transcript line.
+          bottom = 56.dp,
         )
         .heightIn(min = ClawTheme.spacing.touchTarget),
   ) {
@@ -1587,6 +1695,7 @@ private fun ChatHeader(
           contentDescription = nativeString("Show Sidebar"),
           onClick = onOpenSidebar,
           hazeState = hazeState,
+          backdrop = backdrop,
         )
       }
     }
@@ -1680,58 +1789,18 @@ private fun ChatHeader(
       horizontalArrangement = Arrangement.spacedBy(ClawCircularButtonDefaults.GroupSpacing),
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      Box {
-        ClawCapsuleIconButton(
-          leftIcon = LucideSquarePenIcon,
-          leftContentDescription = nativeString("New chat"),
-          onLeftClick = onNewChat,
-          leftEnabled = newChatEnabled,
-          rightIcon = LucideEllipsisIcon,
-          rightContentDescription = nativeString("Chat actions"),
-          onRightClick = { actionsMenuExpanded = true },
-          hazeState = hazeState,
-        )
-        ClawGlassMenu(
-          expanded = actionsMenuExpanded,
-          onDismissRequest = { actionsMenuExpanded = false },
-          hazeState = hazeState,
-          // Covers the ⋮ button: offset shifts the popup up by the button height so
-          // the menu's top‑right corner sits exactly where the button's top‑right is.
-          offset = DpOffset(0.dp, -ClawTheme.spacing.touchTarget),
-          transformOrigin = TransformOrigin(1f, 0f),
-        ) {
-          ClawGlassMenuItem(
-            label = nativeString("Refresh chat"),
-            icon = Icons.Default.Refresh,
-            onClick = onRefresh,
-          )
-          if (branches.size > 1) {
-            ClawGlassMenuItem(
-              label = nativeString("Switch branch"),
-              icon = Icons.Default.ArrowDropDown,
-              enabled = branchSwitchEnabled,
-              onClick = onOpenBranchSwitcher,
-            )
-          }
-          ClawGlassMenuItem(
-            label = nativeString("Dashboard"),
-            icon = Icons.Default.Dashboard,
-            onClick = onOpenDashboard,
-          )
-          ClawGlassMenuItem(
-            label = nativeString("Background tasks"),
-            icon = Icons.Default.HourglassEmpty,
-            onClick = onOpenBackgroundTasks,
-          )
-          if (workspaceGit) {
-            ClawGlassMenuItem(
-              label = newChatInWorktreeLabel,
-              enabled = newChatEnabled,
-              onClick = onNewChatInWorktree,
-            )
-          }
-        }
-      }
+      ClawCapsuleIconButton(
+        leftIcon = LucideSquarePenIcon,
+        leftContentDescription = nativeString("New chat"),
+        onLeftClick = onNewChat,
+        leftEnabled = newChatEnabled,
+        rightIcon = LucideEllipsisIcon,
+        rightContentDescription = nativeString("Chat actions"),
+        onRightClick = { onActionsMenuExpandedChange(!actionsMenuExpanded) },
+        hazeState = hazeState,
+        backdrop = backdrop,
+        modifier = morphTrigger?.modifier ?: Modifier,
+      )
     }
   }
 }
@@ -1811,9 +1880,15 @@ private fun ChatMessageList(
   modifier: Modifier = Modifier,
   /** Subtree the header glass samples: everything below the header. */
   bodyModifier: Modifier = Modifier,
+  /** Full-pane backdrop source for the header glass and the morph menu. */
+  backdropSourceModifier: Modifier = Modifier,
   headerModifier: Modifier = Modifier,
   /** Backdrop long-press message menus blur. Published to the transcript. */
   hazeState: HazeState? = null,
+  /** Pane-wide layer above header and transcript: hosts the morph menu. */
+  overlay: @Composable () -> Unit = {},
+  /** The pane's shared morph surface, published to every slot below. */
+  morphHost: ClawMorphMenuState,
   tabletopPanes: TabletopPaneBounds?,
   features: List<DisplayFeature>,
   conversationStatus: @Composable () -> Unit,
@@ -1931,16 +2006,28 @@ private fun ChatMessageList(
     with(density) {
       maxOf(ClawTheme.spacing.touchTarget.roundToPx(), readerLineHeight).toDp()
     }
-  ChatPaneLayout(
+  // The overlay renders above the whole pane — above the header too — so the
+  // morph menu's glass can grow from the header capsule over the transcript.
+  // It sits outside ChatPaneLayout: that layout's slots are measured for the
+  // header/transcript/composer split and would clip a pane-sized layer.
+  //
+  // The same surface is published downward as the pane's morph host, so the
+  // composer's ＋ and model menus and a long-pressed message claim it instead of
+  // each owning an overlay they would then have to position themselves.
+  CompositionLocalProvider(LocalClawMorphMenuHost provides morphHost) {
+    Box(modifier = modifier) {
+    ChatPaneLayout(
     tabletopPanes = tabletopPanes,
     features = features,
     minimumInputHeight = minimumChatInputHeight(),
     minimumHeaderHeight = minimumHeaderHeight,
     minimumReaderHeight = minimumReaderHeight,
     touchTarget = ClawTheme.spacing.touchTarget,
-    modifier = modifier,
+    // Fill the wrapping overlay Box; IME padding moves pane and overlay together.
+    modifier = Modifier.fillMaxSize(),
     headerModifier = headerModifier,
     bodyModifier = bodyModifier,
+    backdropSourceModifier = backdropSourceModifier,
     header = { compact, tabletop -> header(compact, tabletop) },
     status = conversationStatus,
     composer = { compact, tabletop -> composer(compact, tabletop) },
@@ -2173,13 +2260,19 @@ private fun ChatMessageList(
               visible = readerScroll.showJumpToLatest && !readerScroll.scrolling,
               onClick = readerScroll.jumpToLatest,
               modifier =
-                Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp + minimumChatInputHeight()),
+                Modifier
+                  .align(Alignment.BottomCenter)
+                  .padding(bottom = 10.dp + minimumChatInputHeight()),
             )
           }
         }
       }
     },
-  )
+    )
+    // Above every pane slot, including the header the capsule lives in.
+    overlay()
+    }
+  }
 }
 
 internal data class ChatWorkingRun(
@@ -2225,6 +2318,13 @@ internal class ChatWorkingRunTracker(
     return current
   }
 }
+
+internal const val CHAT_OFFLINE_NOTICE_DELAY_MS = 10_000L
+
+internal fun isTransientGatewayConnectionStatus(statusText: String): Boolean =
+  statusText.trim() == "Connecting…" || statusText.trim() == "Reconnecting…"
+
+internal fun shouldKeepGatewayOfflineNoticeInline(isNetworkFailure: Boolean): Boolean = isNetworkFailure
 
 internal fun showChatLoadingPlaceholder(
   historyLoading: Boolean,
@@ -3679,6 +3779,7 @@ private fun ChatComposer(
   onOpenModelProviders: (String) -> Unit,
   healthOk: Boolean,
   gatewayOffline: Boolean,
+  gatewayConnecting: Boolean,
   showOfflineNotice: Boolean,
   offlineStatus: String,
   pendingRunCount: Int,
@@ -3695,6 +3796,7 @@ private fun ChatComposer(
   onPickVideo: () -> Unit,
   onCapturePhoto: () -> Unit,
   onRemoveAttachment: (String) -> Unit,
+  onAnnotateAttachment: (PendingAttachment, Rect) -> Unit,
   voiceNoteState: VoiceNoteRecorderState,
   voiceNoteElapsedMs: Long,
   voiceNoteLevel: Float,
@@ -3777,6 +3879,7 @@ private fun ChatComposer(
         attachments = attachments,
         preparing = sendInFlight,
         onRemoveAttachment = onRemoveAttachment,
+        onAnnotateAttachment = onAnnotateAttachment,
       )
     }
 
@@ -3796,7 +3899,7 @@ private fun ChatComposer(
     if (recordVoiceNoteEnabled && (dictationState as? ChatDictationState.Failure)?.reason == ChatDictationFailure.Unavailable) {
       TextButton(onClick = onStartVoiceNote) { Text(voiceNoteRecordLabel()) }
     }
-    if (!healthOk && gatewayOffline && showOfflineNotice) {
+    if (showOfflineNotice) {
       ChatOfflineNotice(
         status = offlineStatus,
         onFixConnection = onFixConnection,
@@ -3843,6 +3946,7 @@ private fun ChatComposer(
         } else {
           ChatInputPill(
             inputEnabled = !detailsExpanded,
+            gatewayConnecting = gatewayConnecting,
             onOpenDetails = if (compactHeight) ({ onDetailsExpandedChange(true) }) else null,
             value = value,
             onValueChange = onValueChange,
@@ -3858,7 +3962,6 @@ private fun ChatComposer(
             talkActive = talkActive,
             onToggleTalk = onToggleTalk,
             runActive = pendingRunCount > 0,
-            connectionPending = gatewayOffline && !showOfflineNotice,
             sendInFlight = sendInFlight,
             onAbort = onAbort,
             hasContent = hasContent,
@@ -4769,8 +4872,8 @@ internal fun canSelectChatPermissionMode(
 @Composable
 private fun ChatInputPill(
   inputEnabled: Boolean,
-  connectionPending: Boolean,
   onOpenDetails: (() -> Unit)?,
+  gatewayConnecting: Boolean,
   value: String,
   onValueChange: (String) -> Unit,
   onPickImages: () -> Unit,
@@ -4817,8 +4920,80 @@ private fun ChatInputPill(
     focusManager.clearFocus(force = true)
     keyboardController?.hide()
   }
-  var attachmentMenuExpanded by remember { mutableStateOf(false) }
-  var modelMenuExpanded by remember { mutableStateOf(false) }
+  // Both composer menus grow out of their own button through the pane's shared
+  // morph surface. Each keeps its own anchor: the surface has one slot, and the
+  // last control to lay out must not decide where the next menu opens.
+  val attachmentTrigger = clawMorphTrigger(LocalClawMorphMenuHost.current)
+  val modelTrigger = clawMorphTrigger(LocalClawMorphMenuHost.current)
+  val attachmentMenuContent: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit = {
+    ClawGlassMenuItem(
+      label = nativeString("Camera"),
+      icon = LucideCameraIcon,
+      onClick = onCapturePhoto,
+    )
+    ClawGlassMenuItem(
+      label = nativeString("Photos"),
+      icon = LucideImageIcon,
+      onClick = onPickImages,
+    )
+    ClawGlassMenuItem(
+      label = nativeString("Videos"),
+      icon = LucideVideoIcon,
+      onClick = onPickVideo,
+    )
+    ClawGlassMenuItem(
+      label = nativeString("Files"),
+      icon = LucidePaperclipIcon,
+      onClick = onPickAudioOrDocument,
+    )
+  }
+  val modelMenuContent: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit = {
+    if (!modelSelectionLocked) {
+      listOf(
+        nativeString("Pinned") to modelSections.pinned,
+        nativeString("Recent") to modelSections.recent,
+        nativeString("Models") to modelSections.remaining,
+      ).forEach { (title, models) ->
+        if (models.isNotEmpty()) {
+          Text(
+            text = title,
+            style = ClawTheme.type.caption,
+            color = ClawTheme.colors.textMuted,
+            modifier = Modifier.padding(start = 12.dp, top = 8.dp, bottom = 2.dp),
+          )
+          models.forEach { model ->
+            val ref = model.providerQualifiedRef()
+            ClawGlassMenuItem(
+              label = model.name.ifEmpty { ref.substringAfterLast('/') },
+              selected = ref in modelFavorites,
+              enabled = model.available != false,
+              onClick = { onSelectModel(ref) },
+            )
+          }
+        }
+      }
+      ClawGlassMenuItem(
+        label = nativeString("Default model"),
+        selected = false,
+        onClick = { onSelectModel(null) },
+      )
+    }
+    HorizontalDivider(
+      color = ClawTheme.colors.border,
+      modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+    )
+    ClawGlassMenuItem(
+      label = nativeString("More info"),
+      icon = LucideEllipsisIcon,
+      onClick = {
+        dismissKeyboardForPicker()
+        onOpenModelPicker()
+      },
+    )
+  }
+  // Grows up from the button's bottom-left and covers it, like the popup did.
+  // The heavier tint keeps the input bar underneath from reading through.
+  val composerMenuOrigin = TransformOrigin(0f, 1f)
   val draftStyle = chatDraftStyle()
   val haptics = rememberClawHaptics()
 
@@ -4869,27 +5044,43 @@ private fun ChatInputPill(
             Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
               if (value.isEmpty()) {
                 // BasicTextField's line limit does not constrain its decoration.
-                AnimatedContent(
-                  targetState = connectionPending,
-                  transitionSpec = {
-                    fadeIn(animationSpec = tween(180)) togetherWith fadeOut(animationSpec = tween(180))
-                  },
-                  label = "connection-placeholder",
-                ) { pending ->
-                  if (pending) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                      CircularProgressIndicator(
-                        modifier = Modifier.size(12.dp),
-                        strokeWidth = 1.5.dp,
-                        color = ClawTheme.colors.textMuted,
-                      )
-                      Text(text = nativeString("Connecting…"), style = draftStyle, color = ClawTheme.colors.textMuted, maxLines = 1)
-                    }
-                  } else {
-                    Text(text = nativeString("Message OpenClaw"), style = draftStyle, color = ClawTheme.colors.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+              AnimatedContent(
+                targetState = gatewayConnecting,
+                transitionSpec = {
+                  (fadeIn(animationSpec = tween(220)) + scaleIn(initialScale = 0.98f, animationSpec = tween(220))) togetherWith
+                    fadeOut(animationSpec = tween(160))
+                },
+                label = "gateway connection placeholder",
+              ) { connecting ->
+                if (connecting) {
+                  Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                  ) {
+                    CircularProgressIndicator(
+                      modifier = Modifier.size(14.dp),
+                      strokeWidth = 1.8.dp,
+                      color = ClawTheme.colors.textMuted,
+                    )
+                    Text(
+                      text = nativeString("Connecting…"),
+                      style = draftStyle,
+                      color = ClawTheme.colors.textMuted,
+                      maxLines = 1,
+                      overflow = TextOverflow.Ellipsis,
+                    )
                   }
+                } else {
+                  Text(
+                    text = nativeString("Message OpenClaw"),
+                    style = draftStyle,
+                    color = ClawTheme.colors.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                  )
                 }
               }
+            }
               innerTextField()
             }
           },
@@ -4908,9 +5099,14 @@ private fun ChatInputPill(
           Surface(
             onClick = {
               haptics.tap()
-              attachmentMenuExpanded = true
+              attachmentTrigger.open(
+                origin = composerMenuOrigin,
+                panelWidth = 200.dp,
+                tintAlpha = 0.82f,
+                content = attachmentMenuContent,
+              )
             },
-            modifier = Modifier.size(ClawTheme.spacing.touchTarget),
+            modifier = Modifier.size(ClawTheme.spacing.touchTarget).then(attachmentTrigger.modifier),
             shape = CircleShape,
             color = Color.Transparent,
             contentColor = ClawTheme.colors.textMuted,
@@ -4919,109 +5115,22 @@ private fun ChatInputPill(
               Icon(imageVector = Icons.Default.Add, contentDescription = nativeString("Add attachment"), modifier = Modifier.size(20.dp))
             }
           }
-          ClawGlassMenu(
-            expanded = attachmentMenuExpanded,
-            onDismissRequest = { attachmentMenuExpanded = false },
-            hazeState = hazeState,
-            focusable = false,
-            // Covers the ＋ button: offset shifts the popup down by the button
-            // height so the menu‑bottom edge sits at the button bottom‑edge, and
-            // the left‑edge flip (narrow‑screen anchor) makes left = left.
-            offset = DpOffset(0.dp, -ClawTheme.spacing.touchTarget),
-            transformOrigin = TransformOrigin(0f, 1f),
-            // Sits on top of the composer capsule; a solid fill keeps the
-            // covered input bar from showing through as a second layer.
-            fillAlpha = 0.82f,
-          ) {
-            ClawGlassMenuItem(
-              label = nativeString("Camera"),
-              icon = LucideCameraIcon,
-              onClick = onCapturePhoto,
-            )
-            ClawGlassMenuItem(
-              label = nativeString("Photos"),
-              icon = LucideImageIcon,
-              onClick = onPickImages,
-            )
-            ClawGlassMenuItem(
-              label = nativeString("Videos"),
-              icon = LucideVideoIcon,
-              onClick = onPickVideo,
-            )
-            ClawGlassMenuItem(
-              label = nativeString("Files"),
-              icon = LucidePaperclipIcon,
-              onClick = onPickAudioOrDocument,
-            )
-          }
         }
         Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-          Box(modifier = Modifier.weight(1f, fill = false)) {
+          Box(modifier = Modifier.weight(1f, fill = false).then(modelTrigger.modifier)) {
             ChatComposerModelPicker(
               label = selectedModelLabel,
               contextUsage = contextUsage,
               enabled = modelPickerEnabled,
-              onClick = { modelMenuExpanded = true },
-            )
-            ClawGlassMenu(
-              expanded = modelMenuExpanded,
-              onDismissRequest = { modelMenuExpanded = false },
-              hazeState = hazeState,
-              focusable = false,
-              offset = DpOffset(0.dp, -ClawTheme.spacing.touchTarget),
-              transformOrigin = TransformOrigin(0f, 1f),
-              fillAlpha = 0.82f,
-            ) {
-              if (!modelSelectionLocked) {
-                listOf(
-                  nativeString("Pinned") to modelSections.pinned,
-                  nativeString("Recent") to modelSections.recent,
-                  nativeString("Models") to modelSections.remaining,
-                ).forEach { (title, models) ->
-                  if (models.isNotEmpty()) {
-                    Text(
-                      text = title,
-                      style = ClawTheme.type.caption,
-                      color = ClawTheme.colors.textMuted,
-                      modifier = Modifier.padding(start = 12.dp, top = 8.dp, bottom = 2.dp),
-                    )
-                    models.forEach { model ->
-                      val ref = model.providerQualifiedRef()
-                      ClawGlassMenuItem(
-                        label = model.name.ifEmpty { ref.substringAfterLast('/') },
-                        selected = ref in modelFavorites,
-                        enabled = model.available != false,
-                        onClick = {
-                          modelMenuExpanded = false
-                          onSelectModel(ref)
-                        },
-                      )
-                    }
-                  }
-                }
-                ClawGlassMenuItem(
-                  label = nativeString("Default model"),
-                  selected = false,
-                  onClick = {
-                    modelMenuExpanded = false
-                    onSelectModel(null)
-                  },
+              onClick = {
+                modelTrigger.open(
+                  origin = composerMenuOrigin,
+                  panelWidth = 200.dp,
+                  tintAlpha = 0.82f,
+                  content = modelMenuContent,
                 )
-              }
-              HorizontalDivider(
-                color = ClawTheme.colors.border,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-              )
-              ClawGlassMenuItem(
-                label = nativeString("More info"),
-                icon = LucideEllipsisIcon,
-                onClick = {
-                  modelMenuExpanded = false
-                  dismissKeyboardForPicker()
-                  onOpenModelPicker()
-                },
-              )
-            }
+              },
+            )
           }
           if (thinkingSupported || fastModeEnabled || fastMode) {
             ChatThinkingLevelPicker(
@@ -5386,6 +5495,7 @@ private fun AttachmentStrip(
   attachments: List<PendingAttachment>,
   preparing: Boolean,
   onRemoveAttachment: (String) -> Unit,
+  onAnnotateAttachment: (PendingAttachment, Rect) -> Unit,
 ) {
   Row(
     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -5393,7 +5503,13 @@ private fun AttachmentStrip(
     verticalAlignment = Alignment.CenterVertically,
   ) {
     attachments.forEach { attachment ->
-      AttachmentChip(attachment = attachment, onRemove = { onRemoveAttachment(attachment.id) })
+      key(attachment.id) {
+        AttachmentChip(
+          attachment = attachment,
+          onRemove = { onRemoveAttachment(attachment.id) },
+          onAnnotate = { chipBounds -> onAnnotateAttachment(attachment, chipBounds) },
+        )
+      }
     }
     if (preparing) {
       CircularProgressIndicator(
@@ -5410,54 +5526,99 @@ private fun AttachmentStrip(
   }
 }
 
+/** Image attachment queued in the annotation editor, with the chip it launched from. */
+internal data class AttachmentAnnotationTarget(
+  val attachment: PendingAttachment,
+  val chipBounds: Rect,
+)
+
 @Composable
 private fun AttachmentChip(
   attachment: PendingAttachment,
   onRemove: () -> Unit,
+  onAnnotate: ((Rect) -> Unit)? = null,
 ) {
   val videoThumbnail =
     remember(attachment.videoThumbnailBase64) {
       attachment.videoThumbnailBase64?.let(::decodeBase64Bitmap)
     }
-  Surface(
-    shape = RoundedCornerShape(ClawTheme.radii.pill),
-    color = ClawTheme.colors.surfaceRaised,
-    contentColor = ClawTheme.colors.text,
-    border = BorderStroke(1.dp, ClawTheme.colors.border),
-  ) {
-    Row(
-      modifier = Modifier.padding(start = 9.dp, top = 5.dp, end = 5.dp, bottom = 5.dp),
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(6.dp),
+  val isImage = attachment.mimeType.startsWith("image/")
+  val imageState = if (isImage) rememberBase64ImageState(attachment.base64) else null
+  var chipBounds by remember { mutableStateOf<Rect?>(null) }
+  var thumbBounds by remember { mutableStateOf<Rect?>(null) }
+  val annotator = onAnnotate
+  val chipModifier = Modifier.onGloballyPositioned { chipBounds = it.boundsInRoot() }
+
+  val content: @Composable () -> Unit = {
+    if (isImage) {
+      val thumb = imageState?.image
+      val thumbModifier =
+        Modifier
+          .size(40.dp)
+          .clip(RoundedCornerShape(8.dp))
+          .onGloballyPositioned { thumbBounds = it.boundsInRoot() }
+      if (thumb != null) {
+        Image(
+          bitmap = thumb,
+          contentDescription = null,
+          contentScale = ContentScale.Crop,
+          modifier = thumbModifier,
+        )
+      } else {
+        Box(modifier = thumbModifier.background(ClawTheme.colors.canvas), contentAlignment = Alignment.Center) {
+          Icon(imageVector = LucideImageIcon, contentDescription = null, modifier = Modifier.size(16.dp), tint = ClawTheme.colors.textMuted)
+        }
+      }
+    } else if (attachment.mimeType.startsWith("audio/")) {
+      Icon(imageVector = Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(14.dp), tint = ClawTheme.colors.textMuted)
+    } else if (attachment.mimeType.startsWith("video/")) {
+      if (videoThumbnail != null) {
+        Image(
+          bitmap = videoThumbnail.asImageBitmap(),
+          contentDescription = null,
+          contentScale = ContentScale.Crop,
+          modifier = Modifier.size(40.dp).clip(RoundedCornerShape(8.dp)),
+        )
+      } else {
+        Icon(imageVector = Icons.Default.Videocam, contentDescription = null, modifier = Modifier.size(14.dp), tint = ClawTheme.colors.textMuted)
+      }
+    }
+    Text(
+      text =
+        attachment.durationMs?.let { duration -> nativeString("Voice note · \${formatVoiceNoteDuration(duration)}", formatVoiceNoteDuration(duration)) }
+          ?: attachment.fileName,
+      style = ClawTheme.type.caption,
+      color = ClawTheme.colors.textMuted,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+      modifier = Modifier.widthIn(max = 96.dp),
+    )
+    Surface(onClick = onRemove, modifier = Modifier.size(ClawTheme.spacing.touchTarget), shape = CircleShape, color = ClawTheme.colors.canvas, contentColor = ClawTheme.colors.text) {
+      Box(contentAlignment = Alignment.Center) {
+        Icon(imageVector = Icons.Default.Close, contentDescription = nativeString("Remove attachment"), modifier = Modifier.size(13.dp))
+      }
+    }
+  }
+
+  if (annotator != null && isImage) {
+    Surface(
+      onClick = { (thumbBounds ?: chipBounds)?.let(annotator) },
+      shape = RoundedCornerShape(ClawTheme.radii.pill),
+      color = ClawTheme.colors.surfaceRaised,
+      contentColor = ClawTheme.colors.text,
+      border = BorderStroke(1.dp, ClawTheme.colors.border),
+      modifier = chipModifier,
+      content = { Row(modifier = Modifier.padding(start = 9.dp, top = 5.dp, end = 5.dp, bottom = 5.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), content = { content() }) },
+    )
+  } else {
+    Surface(
+      shape = RoundedCornerShape(ClawTheme.radii.pill),
+      color = ClawTheme.colors.surfaceRaised,
+      contentColor = ClawTheme.colors.text,
+      border = BorderStroke(1.dp, ClawTheme.colors.border),
+      modifier = chipModifier,
     ) {
-      if (attachment.mimeType.startsWith("audio/")) {
-        Icon(imageVector = Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(14.dp), tint = ClawTheme.colors.textMuted)
-      } else if (attachment.mimeType.startsWith("video/")) {
-        if (videoThumbnail != null) {
-          Image(
-            bitmap = videoThumbnail.asImageBitmap(),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.size(28.dp).clip(RoundedCornerShape(5.dp)),
-          )
-        } else {
-          Icon(imageVector = Icons.Default.Videocam, contentDescription = null, modifier = Modifier.size(14.dp), tint = ClawTheme.colors.textMuted)
-        }
-      }
-      Text(
-        text =
-          attachment.durationMs?.let { duration -> nativeString("Voice note · \${formatVoiceNoteDuration(duration)}", formatVoiceNoteDuration(duration)) }
-            ?: attachment.fileName,
-        style = ClawTheme.type.caption,
-        color = ClawTheme.colors.textMuted,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-      )
-      Surface(onClick = onRemove, modifier = Modifier.size(ClawTheme.spacing.touchTarget), shape = CircleShape, color = ClawTheme.colors.canvas, contentColor = ClawTheme.colors.text) {
-        Box(contentAlignment = Alignment.Center) {
-          Icon(imageVector = Icons.Default.Close, contentDescription = nativeString("Remove attachment"), modifier = Modifier.size(13.dp))
-        }
-      }
+      Row(modifier = Modifier.padding(start = 9.dp, top = 5.dp, end = 5.dp, bottom = 5.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), content = { content() })
     }
   }
 }

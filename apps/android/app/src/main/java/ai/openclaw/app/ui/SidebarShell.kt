@@ -1,8 +1,13 @@
 package ai.openclaw.app.ui
 
 import ai.openclaw.app.ui.design.ClawGlassHost
+import ai.openclaw.app.ui.design.ClawMorphMenuOverlay
 import ai.openclaw.app.ui.design.ClawTheme
+import ai.openclaw.app.ui.design.LocalClawMorphMenuHost
+import ai.openclaw.app.ui.design.rememberClawBackdrop
 import ai.openclaw.app.ui.design.rememberClawHaptics
+import ai.openclaw.app.ui.design.rememberClawMorphMenuState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,6 +18,7 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -24,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import com.kyant.backdrop.backdrops.layerBackdrop
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
@@ -92,7 +99,9 @@ internal fun SidebarNavigationShell(
       Layout(
         content = {
           Box(Modifier.fillMaxSize()) { content() }
-          Box(Modifier.fillMaxSize().testTag("sidebar-permanent")) { ClawGlassHost(Modifier.fillMaxSize()) { sidebar() } }
+          Box(Modifier.fillMaxSize().testTag("sidebar-permanent")) {
+            SidebarMorphSurface(Modifier.fillMaxSize()) { sidebar() }
+          }
         },
         modifier = Modifier.fillMaxSize(),
       ) { measurables, constraints ->
@@ -123,9 +132,10 @@ internal fun SidebarNavigationShell(
           modifier = Modifier.width(SidebarDrawerMaxWidth),
           drawerContainerColor = ClawTheme.colors.canvas,
         ) {
-          ClawGlassHost(modifier = Modifier.requiredWidth(SidebarDrawerMaxWidth).fillMaxHeight()) {
-            sidebar()
-          }
+          SidebarMorphSurface(
+            modifier = Modifier.requiredWidth(SidebarDrawerMaxWidth).fillMaxHeight(),
+            content = sidebar,
+          )
         }
       },
     ) {
@@ -144,5 +154,39 @@ internal fun SidebarNavigationShell(
         Box(Modifier.fillMaxSize()) { content() }
       }
     }
+  }
+}
+/**
+ * The sidebar's glass surface together with its own morph menu host.
+ *
+ * Rows live in a scrolling list, and a menu drawn inside that list is clipped by
+ * it — so the morph glass is drawn by a layer above the whole list, and the list
+ * is what that layer samples. Same split the chat pane uses: the backdrop source
+ * must be an ancestor of the content, never of the overlay that draws it.
+ */
+@Composable
+private fun SidebarMorphSurface(
+  modifier: Modifier = Modifier,
+  content: @Composable () -> Unit,
+) {
+  val morph = rememberClawMorphMenuState()
+  val backdrop = rememberClawBackdrop()
+  Box(modifier = modifier) {
+    Box(
+      modifier =
+        Modifier
+          .fillMaxSize()
+          .layerBackdrop(backdrop)
+          .background(ClawTheme.colors.canvas),
+    ) {
+      ClawGlassHost(modifier = Modifier.fillMaxSize()) {
+        CompositionLocalProvider(LocalClawMorphMenuHost provides morph, content = content)
+      }
+    }
+    ClawMorphMenuOverlay(
+      state = morph,
+      onDismissRequest = morph::dismiss,
+      backdrop = backdrop,
+    )
   }
 }

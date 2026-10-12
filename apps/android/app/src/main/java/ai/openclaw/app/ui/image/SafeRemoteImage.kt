@@ -362,7 +362,14 @@ internal val safePublicHttpClient: OkHttpClient =
 private val safeRemoteImageFetcher = SafeRemoteImageFetcher()
 internal val safeRemoteImageStore = SafeRemoteImageStore(fetcher = safeRemoteImageFetcher::fetch)
 
-private suspend fun Call.executeCancellable(): Response? =
+/**
+ * Runs a call so coroutine cancellation actually aborts the socket.
+ *
+ * Shared with the app-update checker: any caller hitting a user-supplied URL must
+ * stop the request when its scope dies, or a background check outlives the screen
+ * that started it. Returns null for transport failure; cancellation never resumes.
+ */
+internal suspend fun Call.executeCancellable(): Response? =
   suspendCancellableCoroutine { continuation ->
     continuation.invokeOnCancellation { cancel() }
     val response =

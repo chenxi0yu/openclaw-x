@@ -349,12 +349,11 @@ dependencies {
   // R8 will tree-shake unused icons when minify is enabled on release builds.
   implementation(libs.androidx.compose.material.icons.extended)
 
-  // Haze draws the frosted-glass backdrop for floating menus. 2.0 added
-  // cross-window alignment: a source in the app window and a blur inside a
-  // popup/dialog window resolve against screen coordinates instead of root
-  // coordinates, which is what made the blur pin itself to the top-left corner.
+  // Haze remains for existing popup menus; the chat header uses Backdrop because
+  // it can sample an in-window layer and apply liquid-glass effects in place.
   implementation(libs.haze)
   implementation(libs.haze.blur)
+  implementation(libs.backdrop)
 
   debugImplementation(libs.androidx.compose.ui.tooling)
 

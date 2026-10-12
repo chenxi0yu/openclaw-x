@@ -452,6 +452,60 @@ class ChatControllerStreamReplayTest {
 
   @Test
   @OptIn(ExperimentalCoroutinesApi::class)
+  fun emptyChatReplaceClearsTheLiveAssistantProjection() =
+    runTest {
+      val gateway = ScriptedGateway(json)
+      gateway.respondChatSend(status = "started")
+      val controller = loadController(gateway)
+
+      assertTrue(controller.sendMessageAwaitAcceptance("Clear this", "off", emptyList()))
+      val runId = requireNotNull(gateway.lastRunId)
+      controller.handleGatewayEvent("chat", chatDeltaPayload("main", runId, 1, null, "stale output"))
+      assertEquals("stale output", controller.streamingAssistantText.value)
+
+      controller.handleGatewayEvent(
+        "chat",
+        """{"sessionKey":"main","runId":"$runId","seq":2,"state":"delta","replace":true,"deltaText":""}""",
+      )
+
+      assertEquals("", controller.streamingAssistantText.value)
+    }
+
+  @Test
+  @OptIn(ExperimentalCoroutinesApi::class)
+  fun agentReplaceUsesReplacementSemanticsForSnapshotsAndDeltas() =
+    runTest {
+      val gateway = ScriptedGateway(json)
+      gateway.respondChatSend(status = "started")
+      val controller = loadController(gateway)
+
+      assertTrue(controller.sendMessageAwaitAcceptance("Replace this", "off", emptyList()))
+      val runId = requireNotNull(gateway.lastRunId)
+      controller.handleGatewayEvent(
+        "agent",
+        """{"sessionKey":"main","runId":"$runId","stream":"assistant","data":{"text":"first"}}""",
+      )
+      controller.handleGatewayEvent(
+        "agent",
+        """{"sessionKey":"main","runId":"$runId","stream":"assistant","data":{"delta":" second"}}""",
+      )
+      assertEquals("first second", controller.streamingAssistantText.value)
+
+      controller.handleGatewayEvent(
+        "agent",
+        """{"sessionKey":"main","runId":"$runId","stream":"assistant","data":{"delta":"replacement","replace":true}}""",
+      )
+      assertEquals("replacement", controller.streamingAssistantText.value)
+
+      controller.handleGatewayEvent(
+        "agent",
+        """{"sessionKey":"main","runId":"$runId","stream":"assistant","data":{"text":"","replace":true}}""",
+      )
+      assertEquals("", controller.streamingAssistantText.value)
+    }
+
+  @Test
+  @OptIn(ExperimentalCoroutinesApi::class)
   fun cleanRunStreamsV3AndV4DeltasThenConvergesToHistoryWithoutDuplicates() =
     runTest {
       val gateway = ScriptedGateway(json)

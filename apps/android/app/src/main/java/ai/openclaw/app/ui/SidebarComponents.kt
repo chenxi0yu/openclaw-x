@@ -4,8 +4,9 @@ import ai.openclaw.app.R
 import ai.openclaw.app.chat.ChatSessionEntry
 import ai.openclaw.app.chat.isSessionRunActive
 import ai.openclaw.app.i18n.nativeString
-import ai.openclaw.app.ui.design.ClawGlassMenu
 import ai.openclaw.app.ui.design.ClawGlassMenuDefaults
+import ai.openclaw.app.ui.design.LocalClawMorphMenuHost
+import ai.openclaw.app.ui.design.clawMorphTrigger
 import ai.openclaw.app.ui.design.ClawTheme
 import ai.openclaw.app.ui.design.rememberClawHaptics
 import ai.openclaw.app.ui.design.sessionColor
@@ -63,9 +64,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerInputScope
@@ -83,7 +87,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -527,7 +530,30 @@ internal fun SidebarRowSurface(
   content: @Composable RowScope.() -> Unit,
 ) {
   val haptics = rememberClawHaptics()
-  var menuExpanded by remember { mutableStateOf(false) }
+  val density = LocalDensity.current
+  val rowTrigger = clawMorphTrigger(LocalClawMorphMenuHost.current)
+
+  /**
+   * Long press condenses the row itself into the action card: the anchor is the
+   * row's bounds, inset the same way the old popup was offset, so the glass
+   * starts where the row is rather than appearing next to it.
+   */
+  fun openRowMenu() {
+    val bounds = rowTrigger.anchor ?: return
+    val menu = menuContent ?: return
+    val insetX = with(density) { 10.dp.roundToPx() }
+    val insetY = with(density) { (-6).dp.roundToPx() }
+    rowTrigger.open(
+      panelWidth = 200.dp,
+      overrideAnchor =
+        Rect(
+          Offset(bounds.left + insetX, bounds.top + insetY),
+          Offset(bounds.right + insetX, bounds.bottom + insetY),
+        ),
+      content = menu,
+    )
+  }
+
   val interactionModifier =
     if (menuContent == null) {
       if (selected == null) {
@@ -544,12 +570,12 @@ internal fun SidebarRowSurface(
         onClick = onClick,
         onLongClick = {
           haptics.longPress()
-          menuExpanded = true
+          openRowMenu()
         },
         onLongClickLabel = nativeString("Session actions"),
       )
     }
-  Box(modifier = Modifier.fillMaxWidth()) {
+  Box(modifier = Modifier.fillMaxWidth().then(rowTrigger.anchorModifier)) {
     Row(
       modifier =
         Modifier
@@ -576,17 +602,6 @@ internal fun SidebarRowSurface(
       horizontalArrangement = Arrangement.spacedBy(10.dp),
       content = content,
     )
-    if (menuContent != null) {
-      ClawGlassMenu(
-        expanded = menuExpanded,
-        onDismissRequest = { menuExpanded = false },
-        // A little inset from the row's leading edge so the card reads as a
-        // separate layer rather than an extension of the row.
-        offset = DpOffset(10.dp, (-6).dp),
-      ) {
-        menuContent()
-      }
-    }
   }
 }
 

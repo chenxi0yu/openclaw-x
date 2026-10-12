@@ -99,6 +99,7 @@ class AndroidLicenseNoticesTest {
         "KaTeX",
         "khroma",
         "Kotlin Libraries",
+        "Kyant0 Backdrop",
         "layout-base",
         "llama.cpp",
         "Lobe Icons",

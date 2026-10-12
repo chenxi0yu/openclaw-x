@@ -5,6 +5,8 @@ package ai.openclaw.app
 import ai.openclaw.app.ui.design.DEFAULT_APP_TEXT_SCALE
 import ai.openclaw.app.ui.design.MAX_APP_TEXT_SCALE
 import ai.openclaw.app.ui.design.MIN_APP_TEXT_SCALE
+import ai.openclaw.app.update.DEFAULT_APP_UPDATE_LINK_PATTERN
+import ai.openclaw.app.update.DEFAULT_APP_UPDATE_REPOSITORY
 import ai.openclaw.app.gateway.GatewayBootstrapHandoff
 import ai.openclaw.app.gateway.GatewayCustomHeaders
 import ai.openclaw.app.gateway.GatewayRegistryStore
@@ -128,6 +130,12 @@ class SecurePrefs(
     private const val sessionCustomGroupsKey = "sessions.customGroups"
     private const val sidebarPageOrderKey = "sidebar.pageOrder"
     private const val sidebarVisiblePagesKey = "sidebar.visiblePages"
+
+    // App update source settings: the fork's GitHub repository to query, whether to
+    // check on launch, and the rule that lifts the download link out of release notes.
+    private const val appUpdateRepositoryKey = "appUpdate.repository"
+    private const val appUpdateAutoCheckKey = "appUpdate.autoCheck"
+    private const val appUpdateLinkPatternKey = "appUpdate.linkPattern"
     private val appearanceSyncKeys = setOf("ui.theme", "ui.themeMode", "ui.accent")
     private const val maxChatModelRecents = 5
     private const val gatewayCustomHeadersKeyPrefix = "gateway.customHeaders."
@@ -314,6 +322,38 @@ class SecurePrefs(
   fun setHapticsEnabled(enabled: Boolean) {
     plainPrefs.edit { putBoolean(hapticsEnabledKey, enabled) }
     _hapticsEnabled.value = enabled
+  }
+
+  // Update checks run against a public release feed, never the gateway, so these stay
+  // plain prefs: nothing here is secret and they must survive cold starts.
+  private fun loadAppUpdateRepository(): String = plainPrefs.getString(appUpdateRepositoryKey, null)?.trim().orEmpty().ifEmpty { DEFAULT_APP_UPDATE_REPOSITORY }
+
+  private val _appUpdateRepository = MutableStateFlow(loadAppUpdateRepository())
+  val appUpdateRepository: StateFlow<String> = _appUpdateRepository
+
+  private val _appUpdateAutoCheck = MutableStateFlow(plainPrefs.getBoolean(appUpdateAutoCheckKey, true))
+  val appUpdateAutoCheck: StateFlow<Boolean> = _appUpdateAutoCheck
+
+  private fun loadAppUpdateLinkPattern(): String = plainPrefs.getString(appUpdateLinkPatternKey, null)?.trim().orEmpty().ifEmpty { DEFAULT_APP_UPDATE_LINK_PATTERN }
+
+  private val _appUpdateLinkPattern = MutableStateFlow(loadAppUpdateLinkPattern())
+  val appUpdateLinkPattern: StateFlow<String> = _appUpdateLinkPattern
+
+  fun setAppUpdateRepository(value: String) {
+    val trimmed = value.trim()
+    plainPrefs.edit { putString(appUpdateRepositoryKey, trimmed) }
+    _appUpdateRepository.value = trimmed
+  }
+
+  fun setAppUpdateAutoCheck(enabled: Boolean) {
+    plainPrefs.edit { putBoolean(appUpdateAutoCheckKey, enabled) }
+    _appUpdateAutoCheck.value = enabled
+  }
+
+  fun setAppUpdateLinkPattern(value: String) {
+    val trimmed = value.trim()
+    plainPrefs.edit { putString(appUpdateLinkPatternKey, trimmed) }
+    _appUpdateLinkPattern.value = trimmed
   }
 
   private var pendingAppearancePreferences: List<PendingAppearancePreference> = loadPendingAppearancePreferences()

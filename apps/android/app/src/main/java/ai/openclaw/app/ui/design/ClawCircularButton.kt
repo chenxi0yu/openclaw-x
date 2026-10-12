@@ -9,12 +9,10 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -28,7 +26,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.luminance
@@ -39,6 +36,7 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.kyant.backdrop.Backdrop
 import dev.chrisbanes.haze.HazeState
 
 internal object ClawCircularButtonDefaults {
@@ -55,19 +53,6 @@ internal object ClawCircularButtonDefaults {
  * highlight gradient adds the "raised" feel. No RenderEffect / hazeBlur —
  * those crash `libhwui` on emulators and aren't worth it for a 48dp target.
  */
-private fun Modifier.glassButtonBackground(dark: Boolean, surfaceRaised: Color): Modifier =
-  this
-    .background(
-      surfaceRaised,
-    )
-    .background(
-      Brush.verticalGradient(
-        0f to if (dark) Color.White.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.55f),
-        0.5f to Color.Transparent,
-        1f to Color.Transparent,
-      ),
-    )
-
 /**
  * Raised circular button with a soft glass-look background.
  */
@@ -81,16 +66,22 @@ internal fun ClawCircularIconButton(
   haptic: Boolean = true,
   size: Dp = ClawCircularButtonDefaults.Size,
   hazeState: HazeState? = null,
+  backdrop: Backdrop? = null,
 ) {
   val haptics = rememberClawHaptics()
   val colors = ClawTheme.colors
   val dark = colors.canvas.luminance() < 0.5f
+  val surface = colors.surfaceRaised
   val spotShadow = Color.Black.copy(alpha = if (dark) 0.58f else 0.30f)
   val ambientShadow = Color.Black.copy(alpha = if (dark) 0.34f else 0.16f)
+  val pressDrag = rememberClawPressDrag(glow = dark)
 
   Box(
     modifier =
       modifier
+        // First in the chain so the elevation shadow swells with the glass
+        // instead of staying a static disc behind a moving button.
+        .clawPressDrag(pressDrag)
         .size(ClawTheme.spacing.touchTarget)
         .shadow(
           elevation = ClawCircularButtonDefaults.Elevation,
@@ -100,7 +91,7 @@ internal fun ClawCircularIconButton(
           clip = false,
         )
         .clip(CircleShape)
-        .glassButtonBackground(dark, colors.surfaceRaised)
+        .clawLiquidButton(backdrop, surface, dark)
         .then(
           if (enabled) {
             Modifier.clickable(role = Role.Button) {
@@ -112,7 +103,10 @@ internal fun ClawCircularIconButton(
         .semantics {
           role = Role.Button
           this.contentDescription = contentDescription
-        },
+        }
+        // After `clickable`: the drag observer never consumes, so the tap still
+        // lands, and the glow paints over the glass but under the icon.
+        .then(if (enabled) pressDrag.modifier.then(pressDrag.gestureModifier) else Modifier),
     contentAlignment = Alignment.Center,
   ) {
     Icon(
@@ -176,19 +170,25 @@ internal fun ClawCapsuleIconButton(
   leftEnabled: Boolean = true,
   rightEnabled: Boolean = true,
   hazeState: HazeState? = null,
+  backdrop: Backdrop? = null,
 ) {
   val haptics = rememberClawHaptics()
   val colors = ClawTheme.colors
   val dark = colors.canvas.luminance() < 0.5f
+  val surface = colors.surfaceRaised
   val spotShadow = Color.Black.copy(alpha = if (dark) 0.58f else 0.30f)
   val ambientShadow = Color.Black.copy(alpha = if (dark) 0.34f else 0.16f)
 
   val pillShape = RoundedCornerShape(percent = 50)
   val iconSize = 22.dp
+  // One press state for the whole capsule: either half swells the same surface,
+  // and the glow tracks the finger across both.
+  val pressDrag = rememberClawPressDrag(glow = dark)
 
   Row(
     modifier =
       modifier
+        .clawPressDrag(pressDrag)
         .height(ClawTheme.spacing.touchTarget)
         .shadow(
           elevation = ClawCircularButtonDefaults.Elevation,
@@ -198,7 +198,9 @@ internal fun ClawCapsuleIconButton(
           clip = false,
         )
         .clip(pillShape)
-        .glassButtonBackground(dark, colors.surfaceRaised),
+        .clawLiquidButton(backdrop, surface, dark)
+        .then(pressDrag.modifier)
+        .then(pressDrag.gestureModifier),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     // Left icon

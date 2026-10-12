@@ -30,6 +30,10 @@ import ai.openclaw.app.gateway.GatewayRegistryEntry
 import ai.openclaw.app.gateway.GatewayRegistryEntryKind
 import ai.openclaw.app.gateway.GatewayUpdateAvailableSummary
 import ai.openclaw.app.systemagent.SystemAgentChatState
+import ai.openclaw.app.update.AppUpdateCheck
+import ai.openclaw.app.update.AppUpdateRelease
+import ai.openclaw.app.update.AppUpdateUiState
+import ai.openclaw.app.update.checkForAppUpdate
 import ai.openclaw.app.ui.GatewayConnectPlan
 import ai.openclaw.app.ui.GatewaySavedAuthAction
 import ai.openclaw.app.ui.SettingsRoute
@@ -55,6 +59,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -609,6 +614,74 @@ class MainViewModel private constructor(
   val appearanceAccentArgb: StateFlow<Long?> = prefs.appearanceAccentArgb
   val appearanceTextScale: StateFlow<Float> = prefs.appearanceTextScale
   val hapticsEnabled: StateFlow<Boolean> = prefs.hapticsEnabled
+  val appUpdateRepository: StateFlow<String> = prefs.appUpdateRepository
+  val appUpdateAutoCheck: StateFlow<Boolean> = prefs.appUpdateAutoCheck
+  val appUpdateLinkPattern: StateFlow<String> = prefs.appUpdateLinkPattern
+
+  // ---- App update checks -------------------------------------------------------------
+  // One mutable state owns the whole check surface so the settings page and the
+  // startup dialog can never disagree about which release was offered.
+
+  private val appUpdateMutable = MutableStateFlow(AppUpdateUiState())
+  internal val appUpdate: StateFlow<AppUpdateUiState> = appUpdateMutable.asStateFlow()
+
+  private val appUpdatePromptMutable = MutableStateFlow<AppUpdateRelease?>(null)
+
+  /** Release the startup check found and the user has not dismissed yet. */
+  internal val pendingAppUpdate: StateFlow<AppUpdateRelease?> = appUpdatePromptMutable.asStateFlow()
+
+  private var appUpdateCheckJob: Job? = null
+
+  fun setAppUpdateRepository(value: String) {
+    prefs.setAppUpdateRepository(value)
+  }
+
+  fun setAppUpdateAutoCheck(enabled: Boolean) {
+    prefs.setAppUpdateAutoCheck(enabled)
+  }
+
+  fun setAppUpdateLinkPattern(value: String) {
+    prefs.setAppUpdateLinkPattern(value)
+  }
+
+  /**
+   * Runs one update check.
+   *
+   * Launch-path callers set [automatic] so a network failure stays silent — the
+   * user never asked for it and the settings page shows the outcome anyway. A
+   * manual check always surfaces its result.
+   */
+  fun refreshAppUpdate(automatic: Boolean = false) {
+    if (appUpdateCheckJob?.isActive == true) return
+    appUpdateCheckJob =
+      viewModelScope.launch {
+        appUpdateMutable.update { it.copy(checking = true) }
+        val outcome =
+          checkForAppUpdate(
+            repository = prefs.appUpdateRepository.value,
+            currentVersion = BuildConfig.VERSION_NAME,
+            linkPattern = prefs.appUpdateLinkPattern.value,
+          )
+        when (outcome) {
+          is AppUpdateCheck.Available -> {
+            appUpdatePromptMutable.value = outcome.release
+            appUpdateMutable.update { it.copy(checking = false, result = outcome) }
+          }
+          else -> {
+            if (automatic) {
+              // Keep the last manual outcome visible; an automatic failure is not news.
+              appUpdateMutable.update { it.copy(checking = false) }
+            } else {
+              appUpdateMutable.update { it.copy(checking = false, result = outcome) }
+            }
+          }
+        }
+      }
+  }
+
+  fun dismissAppUpdate() {
+    appUpdatePromptMutable.value = null
+  }
   val voiceCaptureMode: StateFlow<VoiceCaptureMode> = runtimeState(initial = VoiceCaptureMode.Off) { it.voiceCaptureMode }
   val activeAudioInputDevicePreference: StateFlow<String?> =
     runtimeState(initial = null) { it.activeAudioInputDevicePreference }

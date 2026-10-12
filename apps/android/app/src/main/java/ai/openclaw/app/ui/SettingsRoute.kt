@@ -12,6 +12,7 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.outlined.AccessTime
 import androidx.compose.material.icons.outlined.DesktopWindows
 import androidx.compose.material.icons.outlined.Inventory2
@@ -54,6 +55,7 @@ internal enum class SettingsRoute(
   PhoneCapabilities(nativeText("Phone Capabilities"), Icons.Default.Lock, SettingsCategory.PhonePrivacy),
   Gateway(nativeText("Gateway"), Icons.Default.Cloud, SettingsCategory.Connection),
   Appearance(nativeText("Appearance"), Icons.Default.Palette, SettingsCategory.ProfileDevice),
+  AppUpdate(nativeText("Update"), Icons.Default.Update, SettingsCategory.ProfileDevice),
   Health(nativeText("Health"), Icons.Default.Settings, SettingsCategory.Diagnostics),
   About(nativeText("About"), Icons.Default.Storage, SettingsCategory.ProfileDevice),
   Licenses(nativeText("Licenses"), Icons.Default.Storage, SettingsCategory.ProfileDevice),

@@ -29,6 +29,10 @@ private const val CHAT_IMAGE_CACHE_BYTES = 16 * 1024 * 1024
 private const val VIDEO_THUMBNAIL_MAX_DIMENSION = 192
 private const val VIDEO_THUMBNAIL_QUALITY = 72
 
+internal data class ImageAnnotationPoint(val x: Float, val y: Float)
+
+internal data class ImageAnnotationStroke(val points: List<ImageAnnotationPoint>)
+
 private val decodedBitmapCache =
   object : LruCache<String, Bitmap>(CHAT_IMAGE_CACHE_BYTES) {
     override fun sizeOf(
@@ -223,6 +227,76 @@ internal fun decodeBase64Bitmap(
   if (base64.length > CHAT_IMAGE_MAX_BASE64_CHARS) return null
   val bytes = Base64.decode(base64, Base64.DEFAULT)
   return decodeImageBytes(bytes, maxDimension)
+}
+
+internal fun annotateBase64Image(
+  base64: String,
+  strokes: List<ImageAnnotationStroke>,
+  canvasWidth: Float,
+  canvasHeight: Float,
+  imageLeft: Float,
+  imageTop: Float,
+  imageWidth: Float,
+  imageHeight: Float,
+): String? {
+  val source = decodeBase64Bitmap(base64, maxDimension = CHAT_ATTACHMENT_MAX_WIDTH) ?: return null
+  val bitmap = source.copy(Bitmap.Config.ARGB_8888, true)
+  val scaleX = bitmap.width / imageWidth.coerceAtLeast(1f)
+  val scaleY = bitmap.height / imageHeight.coerceAtLeast(1f)
+  val canvas = android.graphics.Canvas(bitmap)
+  val paint =
+    android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+      color = android.graphics.Color.RED
+      style = android.graphics.Paint.Style.STROKE
+      strokeWidth = (5f * ((scaleX + scaleY) / 2f)).coerceAtLeast(2f)
+      strokeCap = android.graphics.Paint.Cap.ROUND
+      strokeJoin = android.graphics.Paint.Join.ROUND
+    }
+  strokes.forEach { stroke ->
+    if (stroke.points.size < 2) return@forEach
+    val path = android.graphics.Path()
+    stroke.points.forEachIndexed { index, point ->
+      val x = ((point.x - imageLeft) * scaleX).coerceIn(0f, bitmap.width.toFloat())
+      val y = ((point.y - imageTop) * scaleY).coerceIn(0f, bitmap.height.toFloat())
+      if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+    }
+    canvas.drawPath(path, paint)
+  }
+  // Same gateway frame budget as the original pick: an unbounded re-encode would
+  // exceed CHAT_IMAGE_MAX_BASE64_CHARS and fail to decode back into the chip.
+  val maxBytes = (CHAT_IMAGE_MAX_BASE64_CHARS / 4) * 3
+  val encoded =
+    try {
+      JpegSizeLimiter.compressToLimit(
+        initialWidth = bitmap.width,
+        initialHeight = bitmap.height,
+        startQuality = CHAT_ATTACHMENT_START_QUALITY,
+        maxBytes = maxBytes,
+        minSize = 240,
+        encode = { width, height, quality ->
+          val working =
+            if (width == bitmap.width && height == bitmap.height) {
+              bitmap
+            } else {
+              bitmap.scale(width, height, true)
+            }
+          try {
+            val out = ByteArrayOutputStream()
+            if (!working.compress(Bitmap.CompressFormat.JPEG, quality, out)) {
+              throw IllegalStateException("annotation encode failed")
+            }
+            out.toByteArray()
+          } finally {
+            if (working !== bitmap) {
+              working.recycle()
+            }
+          }
+        },
+      )
+    } finally {
+      bitmap.recycle()
+    }
+  return Base64.encodeToString(encoded.bytes, Base64.NO_WRAP)
 }
 
 /** Decodes already-authorized image bytes without base64 expansion. */

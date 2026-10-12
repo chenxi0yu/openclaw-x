@@ -217,6 +217,7 @@ internal fun SettingsDetailScreen(
     SettingsRoute.PhoneCapabilities -> PhoneCapabilitiesScreen(viewModel = viewModel, onBack = onBack)
     SettingsRoute.Gateway -> GatewaySettingsScreen(viewModel = viewModel, onBack = onBack)
     SettingsRoute.Appearance -> AppearanceSettingsScreen(viewModel = viewModel, onBack = onBack)
+    SettingsRoute.AppUpdate -> AppUpdateSettingsScreen(viewModel = viewModel, onBack = onBack)
     SettingsRoute.Health -> HealthLogsSettingsScreen(viewModel = viewModel, onBack = onBack)
     SettingsRoute.About -> AboutSettingsScreen(viewModel = viewModel, onBack = onBack)
     SettingsRoute.Licenses -> LicensesSettingsScreen(onBack = onBack)

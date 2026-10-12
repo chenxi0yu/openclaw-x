@@ -152,6 +152,15 @@ fun ShellScreen(
       var commandOpen by rememberSaveable { mutableStateOf(false) }
       var conversationScreenWasActive by rememberSaveable { mutableStateOf(false) }
       val pendingTrust by viewModel.pendingGatewayTrust.collectAsState()
+      val pendingAppUpdate by viewModel.pendingAppUpdate.collectAsState()
+      // One launch-time update check, gated on the user's auto-check preference.
+      // Reads the live pref at execution so a first-frame composition order can't
+      // skip it; keyed on Unit so toggling the switch later never re-fires it.
+      LaunchedEffect(Unit) {
+        if (viewModel.appUpdateAutoCheck.value) {
+          viewModel.refreshAppUpdate(automatic = true)
+        }
+      }
       FoldAwareContent(
         features = features,
         modifier = modifier.background(ClawTheme.colors.canvas),
@@ -440,6 +449,11 @@ fun ShellScreen(
               onUseSystemTrust = viewModel::useSystemGatewayTrustPrompt,
               onDecline = viewModel::declineGatewayTrustPrompt,
             )
+          }
+
+          pendingAppUpdate?.let { release ->
+            // Shown shell-wide so a launch-time update prompt survives tab navigation.
+            AppUpdateDialog(release = release, onDismiss = viewModel::dismissAppUpdate)
           }
         }
       }
@@ -1528,6 +1542,7 @@ private fun SettingsShellScreen(
   val dreamingSummary = dreamingState.summary
   val desktopObserveAvailable by viewModel.desktopObserveAvailable.collectAsState()
   val appearanceThemeMode by viewModel.appearanceThemeMode.collectAsState()
+  val pendingAppUpdate by viewModel.pendingAppUpdate.collectAsState()
   val providerRows = providerRows(providers = providers, models = models)
   val readyProviderCount = providerRows.count { it.ready }
   val unknownProviderCount = providerRows.count { it.availability == ProviderAvailability.Unknown }
@@ -1648,6 +1663,11 @@ private fun SettingsShellScreen(
             ),
           ),
           SettingsRow(SettingsRoute.About, nativeText("Version and update")),
+          SettingsRow(
+            SettingsRoute.AppUpdate,
+            if (pendingAppUpdate != null) verbatimText("有新版本") else verbatimText("检查新版本"),
+            status = if (pendingAppUpdate != null) true else null,
+          ),
           SettingsRow(SettingsRoute.Health, nativeText("Diagnostics"), status = isConnected),
         ).filter { it.route.isAvailable(desktopObserveAvailable) }
 

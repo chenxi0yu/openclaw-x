@@ -106,3 +106,24 @@ internal val LucideEllipsisIcon: ImageVector by lazy {
       ),
   )
 }
+
+internal val LucideXIcon: ImageVector by lazy {
+  lucideIcon(
+    name = "LucideX",
+    paths =
+      listOf(
+        "M18 6 6 18",
+        "m6 6 12 12",
+      ),
+  )
+}
+
+internal val LucideCheckIcon: ImageVector by lazy {
+  lucideIcon(
+    name = "LucideCheck",
+    paths =
+      listOf(
+        "M20 6 9 17l-5-5",
+      ),
+  )
+}

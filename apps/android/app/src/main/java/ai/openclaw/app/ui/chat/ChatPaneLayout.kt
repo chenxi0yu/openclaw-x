@@ -36,8 +36,10 @@ internal fun ChatPaneLayout(
   touchTarget: Dp,
   modifier: Modifier = Modifier,
   headerModifier: Modifier = Modifier,
-  /** Applied to the transcript source sampled by the header and composer glass. */
+  /** Applied to the transcript subtree sampled by the long-press glass menus. */
   bodyModifier: Modifier = Modifier,
+  /** Full-pane layer the header glass and the morph menu sample (Backdrop source). */
+  backdropSourceModifier: Modifier = Modifier,
   header: @Composable (compact: Boolean, tabletop: Boolean) -> Unit,
   /**
    * Receives the height (plus gap) the header occupies so the caller can turn it
@@ -99,7 +101,15 @@ internal fun ChatPaneLayout(
 
       val bodyPlaceable =
         subcompose(ChatPaneSlot.Body) {
+          // The backdrop source sits on the *unpadded* full-pane node: the
+          // header glass samples from window y=0, and a source inset by the
+          // pane padding leaves the strip above its top edge empty, which the
+          // blur turns into a visible band under the status bar. The haze
+          // source stays on the transcript node below: Haze refuses to let an
+          // effect blur an ancestor source, and the long-press menus are
+          // descendants of the transcript.
           Layout(
+            modifier = backdropSourceModifier,
             content = {
               // No top padding here: padding would shrink the list and push it
               // out from under the bar, leaving the bar blurring empty space.
@@ -165,6 +175,8 @@ internal fun ChatPaneLayout(
       // pane's very top edge (no `inset`): the host reserves no status-bar inset
       // for the chat pane, and the bar has to start at that edge for its glass
       // to cover the status bar. It pads its own content back down inside.
+      // `upperBounds.top` (not 0): on a fold/tabletop the upper pane starts
+      // below the hinge, and the pane's top edge is where the glass must start.
       headerPlaceable.place(upperBounds.left, upperBounds.top)
     }
   }
