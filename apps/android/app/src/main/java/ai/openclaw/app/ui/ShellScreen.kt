@@ -39,8 +39,17 @@ import ai.openclaw.app.ui.design.ClawStatus
 import ai.openclaw.app.ui.design.ClawTheme
 import ai.openclaw.app.ui.design.LocalClawHapticsEnabled
 import ai.openclaw.app.ui.design.OpenClawMascot
+import ai.openclaw.app.ui.design.SIDEBAR_BLUR_MS
+import ai.openclaw.app.ui.design.SIDEBAR_BLUR_START_DP
+import ai.openclaw.app.ui.design.SIDEBAR_HANDOFF_MS
 import ai.openclaw.app.ui.design.agentAvatarSource
+import ai.openclaw.app.ui.design.clawPageFade
+import ai.openclaw.app.ui.design.clawPagePush
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -93,6 +102,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -101,7 +111,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -110,6 +122,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.window.layout.DisplayFeature
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -266,6 +279,16 @@ fun ShellScreen(
             nav.activeTab == Tab.Sessions -> SidebarDestination.Threads
             else -> null
           }
+        // Blur pull-in for the sidebar hand-off: the page arrives soft and sharpens while the
+        // drawer retracts. A token drives it so Back and the overview cards keep the plain fade.
+        val handoffBlur = remember { Animatable(0f) }
+        var handoffToken by remember { mutableIntStateOf(0) }
+        val sidebarAnimationsEnabled = rememberSystemAnimationsEnabled()
+        LaunchedEffect(handoffToken) {
+          if (handoffToken == 0 || !sidebarAnimationsEnabled) return@LaunchedEffect
+          handoffBlur.snapTo(SIDEBAR_BLUR_START_DP)
+          handoffBlur.animateTo(0f, tween(SIDEBAR_BLUR_MS, easing = LinearOutSlowInEasing))
+        }
         val selectSidebarDestination: (SidebarDestination) -> Unit = { destination ->
           when (destination) {
             SidebarDestination.Settings -> nav.openSettingsRoute(SettingsRoute.Home)
@@ -274,7 +297,18 @@ fun ShellScreen(
             SidebarDestination.Skills -> nav.openSettingsRoute(SettingsRoute.Skills)
             SidebarDestination.Threads -> nav.selectTab(Tab.Sessions)
           }
-          closeSidebar()
+          handoffToken += 1
+          // Ordered hand-off: the selection card travels, the page fades in while the drawer is
+          // still open, and only then does the drawer retract. Closing early would reveal the
+          // page mid-fade, which is the hard cut this sequence exists to remove.
+          if (sidebarAnimationsEnabled) {
+            drawerScope.launch {
+              delay(SIDEBAR_HANDOFF_MS)
+              closeSidebar()
+            }
+          } else {
+            closeSidebar()
+          }
         }
 
         Box(modifier = Modifier.fillMaxSize().background(ClawTheme.colors.canvas)) {
@@ -332,72 +366,93 @@ fun ShellScreen(
               )
             },
           ) {
-            when (nav.activeTab) {
-              Tab.Overview -> {
-                OverviewScreen(
-                  viewModel = viewModel,
-                  showSidebarButton = !permanentSidebar,
-                  onOpenSidebar = openSidebar,
-                  onSelectTab = nav::selectTab,
-                  onOpenSettingsRoute = nav::openSettingsRoute,
-                  onOpenCommand = { commandOpen = true },
-                )
-              }
+            // Tab changes fade the arriving page in instead of sliding it: the sidebar drawer
+            // already owns horizontal travel, and a second slide underneath it reads as two
+            // panels fighting.
+            AnimatedContent(
+              targetState = nav.activeTab,
+              modifier =
+                Modifier
+                  .fillMaxSize()
+                  .graphicsLayer {
+                    // Only while the hand-off is actually soft: a lingering render effect would
+                    // keep the whole page on an offscreen buffer.
+                    val blurRadiusDp = handoffBlur.value
+                    if (blurRadiusDp > 0f) {
+                      val radiusPx = blurRadiusDp.dp.toPx()
+                      renderEffect = BlurEffect(radiusPx, radiusPx)
+                    }
+                  },
+              transitionSpec = { clawPageFade() },
+              label = "shell tab",
+            ) { activeTab ->
+              when (activeTab) {
+                Tab.Overview -> {
+                  OverviewScreen(
+                    viewModel = viewModel,
+                    showSidebarButton = !permanentSidebar,
+                    onOpenSidebar = openSidebar,
+                    onSelectTab = nav::selectTab,
+                    onOpenSettingsRoute = nav::openSettingsRoute,
+                    onOpenCommand = { commandOpen = true },
+                  )
+                }
 
-              Tab.Chat -> {
-                UnifiedChatShellScreen(
-                  viewModel = viewModel,
-                  tabletopPanes = foldBounds.tabletop,
-                  features = features,
-                  showSidebarButton = !permanentSidebar,
-                  onOpenSidebar = openSidebar,
-                  onOpenDashboard = nav::openSessionDashboard,
-                  onOpenGatewaySettings = { nav.openSettingsRoute(SettingsRoute.Gateway) },
-                  onOpenProvidersModels = { nav.openDetailTab(Tab.ProvidersModels) },
-                )
-              }
+                Tab.Chat -> {
+                  UnifiedChatShellScreen(
+                    viewModel = viewModel,
+                    tabletopPanes = foldBounds.tabletop,
+                    features = features,
+                    showSidebarButton = !permanentSidebar,
+                    onOpenSidebar = openSidebar,
+                    onOpenDashboard = nav::openSessionDashboard,
+                    onOpenGatewaySettings = { nav.openSettingsRoute(SettingsRoute.Gateway) },
+                    onOpenProvidersModels = { nav.openDetailTab(Tab.ProvidersModels) },
+                  )
+                }
 
-              Tab.ProvidersModels -> {
-                ProvidersModelsScreen(
-                  viewModel = viewModel,
-                  onBack = nav::back,
-                )
-              }
+                Tab.ProvidersModels -> {
+                  ProvidersModelsScreen(
+                    viewModel = viewModel,
+                    onBack = nav::back,
+                  )
+                }
 
-              Tab.Sessions -> {
-                SessionsScreen(
-                  viewModel = viewModel,
-                  showSidebarButton = !permanentSidebar,
-                  onOpenSidebar = openSidebar,
-                  onOpenChat = { nav.selectTab(Tab.Chat) },
-                )
-              }
+                Tab.Sessions -> {
+                  SessionsScreen(
+                    viewModel = viewModel,
+                    showSidebarButton = !permanentSidebar,
+                    onOpenSidebar = openSidebar,
+                    onOpenChat = { nav.selectTab(Tab.Chat) },
+                  )
+                }
 
-              Tab.Files -> {
-                WorkspaceFilesScreen(
-                  viewModel = viewModel,
-                  onBack = nav::back,
-                )
-              }
+                Tab.Files -> {
+                  WorkspaceFilesScreen(
+                    viewModel = viewModel,
+                    onBack = nav::back,
+                  )
+                }
 
-              Tab.Dashboard -> {
-                SessionDashboardScreen(
-                  viewModel = viewModel,
-                  sessionKey = nav.dashboardSessionKey,
-                  onBack = nav::back,
-                )
-              }
+                Tab.Dashboard -> {
+                  SessionDashboardScreen(
+                    viewModel = viewModel,
+                    sessionKey = nav.dashboardSessionKey,
+                    onBack = nav::back,
+                  )
+                }
 
-              Tab.Settings -> {
-                SettingsShellScreen(
-                  viewModel = viewModel,
-                  route = nav.settingsRoute,
-                  showSidebarButton = !permanentSidebar,
-                  onOpenSidebar = openSidebar,
-                  onRouteChange = nav::openSettingsRouteFromHome,
-                  onBack = nav::back,
-                  onOpenCommand = { commandOpen = true },
-                )
+                Tab.Settings -> {
+                  SettingsShellScreen(
+                    viewModel = viewModel,
+                    route = nav.settingsRoute,
+                    showSidebarButton = !permanentSidebar,
+                    onOpenSidebar = openSidebar,
+                    onRouteChange = nav::openSettingsRouteFromHome,
+                    onBack = nav::back,
+                    onOpenCommand = { commandOpen = true },
+                  )
+                }
               }
             }
           }
@@ -1517,6 +1572,57 @@ private fun SettingsShellScreen(
   onBack: () -> Unit,
   onOpenCommand: () -> Unit,
 ) {
+  val gatewayConnectionDisplay by viewModel.gatewayConnectionDisplay.collectAsState()
+  val isConnected = gatewayConnectionDisplay.isConnected
+
+  LaunchedEffect(isConnected) {
+    if (isConnected) {
+      viewModel.refreshAgents()
+      viewModel.refreshModelCatalog()
+      viewModel.refreshProviderModels()
+      viewModel.refreshCronJobs()
+      viewModel.refreshUsage()
+      viewModel.refreshSkills()
+      viewModel.refreshSkillWorkshopProposals()
+      viewModel.refreshNodesDevices()
+      viewModel.refreshChannels()
+      viewModel.refreshDreaming()
+      viewModel.refreshExecApprovals()
+    }
+  }
+
+  // Home and detail sit one push apart, so both render inside the same AnimatedContent: the page
+  // being left has to stay composed while it slides away, which an early return cannot do.
+  // System Back stays owned by the shell-level BackHandler, which unwinds cross-tab opens to
+  // their originating tab via ShellNavigation. A local BackHandler here would shadow it and
+  // strand cross-tab opens on Settings Home.
+  AnimatedContent(
+    targetState = route,
+    transitionSpec = { clawPagePush(forward = targetState != SettingsRoute.Home) },
+    label = "settings route",
+  ) { targetRoute ->
+    if (targetRoute == SettingsRoute.Home) {
+      SettingsHomeScreen(
+        viewModel = viewModel,
+        showSidebarButton = showSidebarButton,
+        onOpenSidebar = onOpenSidebar,
+        onRouteChange = onRouteChange,
+        onOpenCommand = onOpenCommand,
+      )
+    } else {
+      SettingsDetailScreen(viewModel = viewModel, route = targetRoute, onBack = onBack)
+    }
+  }
+}
+
+@Composable
+private fun SettingsHomeScreen(
+  viewModel: MainViewModel,
+  showSidebarButton: Boolean,
+  onOpenSidebar: () -> Unit,
+  onRouteChange: (SettingsRoute) -> Unit,
+  onOpenCommand: () -> Unit,
+) {
   val displayName by viewModel.displayName.collectAsState()
   val gatewayConnectionDisplay by viewModel.gatewayConnectionDisplay.collectAsState()
   val isConnected = gatewayConnectionDisplay.isConnected
@@ -1548,29 +1654,6 @@ private fun SettingsShellScreen(
   val unknownProviderCount = providerRows.count { it.availability == ProviderAvailability.Unknown }
   val pendingApprovalsCount = approvalInbox.approvals.size + pendingToolCalls.size
 
-  LaunchedEffect(isConnected) {
-    if (isConnected) {
-      viewModel.refreshAgents()
-      viewModel.refreshModelCatalog()
-      viewModel.refreshProviderModels()
-      viewModel.refreshCronJobs()
-      viewModel.refreshUsage()
-      viewModel.refreshSkills()
-      viewModel.refreshSkillWorkshopProposals()
-      viewModel.refreshNodesDevices()
-      viewModel.refreshChannels()
-      viewModel.refreshDreaming()
-      viewModel.refreshExecApprovals()
-    }
-  }
-
-  // System Back for settings routes is owned by the shell-level BackHandler, which
-  // unwinds cross-tab opens to their originating tab via ShellNavigation. A local
-  // BackHandler here would shadow it and strand cross-tab opens on Settings Home.
-  if (route != SettingsRoute.Home) {
-    SettingsDetailScreen(viewModel = viewModel, route = route, onBack = onBack)
-    return
-  }
   val appLanguage = currentAppLanguage()
 
   ClawScaffold(

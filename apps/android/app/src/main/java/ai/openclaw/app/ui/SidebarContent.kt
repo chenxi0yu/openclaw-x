@@ -18,6 +18,13 @@ import ai.openclaw.app.ui.design.ClawGlassMenuItem
 import ai.openclaw.app.ui.design.ClawTheme
 import ai.openclaw.app.ui.design.OpenClawMascot
 import ai.openclaw.app.ui.design.ProviderBrandIcon
+import ai.openclaw.app.ui.design.clawSelectionTravel
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -70,6 +77,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -79,14 +87,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -108,6 +122,9 @@ import kotlinx.coroutines.launch
 import java.util.Collections
 
 private const val SIDEBAR_CATALOG_REFRESH_MS = 30_000L
+
+// The selection card overshoots by this much on its way to a new row, then settles back.
+private const val SIDEBAR_SELECTION_PULSE_SCALE = 1.08f
 
 internal enum class SidebarDestination(
   val stableId: String,
@@ -770,26 +787,80 @@ internal fun OpenClawSidebar(
             onDragActiveChange = onDragActiveChange,
           )
           if (pagesExpanded) {
-            orderedPages.filter { it.stableId in visiblePageIdSet }.forEach { destination ->
-              key(destination.stableId) {
-                SidebarNavigationRow(
-                  destination = destination,
-                  rowHost = rowHost,
-                  selected = destination == activeDestination,
-                  palette = palette,
-                  onClick = { onSelectDestination(destination) },
-                  onMove = { direction ->
-                    viewModel.setSidebarPageOrder(
-                      moveSidebarDestination(
-                        pageIds = pageOrder,
-                        destinationId = destination.stableId,
-                        direction = direction,
-                        visiblePageIds = visiblePageIdSet,
-                      ),
-                    )
+            val pageRows = orderedPages.filter { it.stableId in visiblePageIdSet }
+            var pageRowHeightPx by remember { mutableIntStateOf(0) }
+            val selectedRowIndex = activeDestination?.let { pageRows.indexOf(it) } ?: -1
+            // One card travels between slots instead of every row repainting its own highlight, so
+            // a tap reads as the sidebar picking a page while that page fades in beside it.
+            val selectionTop by
+              animateFloatAsState(
+                targetValue = if (selectedRowIndex >= 0) selectedRowIndex * pageRowHeightPx.toFloat() else 0f,
+                // Snap for the first frame: the row height only becomes known during layout, and
+                // springing from an unmeasured slot would slide the card on drawer open.
+                animationSpec = if (pageRowHeightPx > 0) clawSelectionTravel() else snap(),
+                label = "sidebar selection row",
+              )
+            val selectionAlpha by
+              animateFloatAsState(
+                targetValue = if (selectedRowIndex >= 0) 1f else 0f,
+                animationSpec = tween(140),
+                label = "sidebar selection alpha",
+              )
+            // Grow, travel, settle: the card swells as it leaves and deflates into the new slot.
+            // Only between two real rows, so opening the drawer on the current page never bounces.
+            val selectionScale = remember { Animatable(1f) }
+            var lastSelectedRowIndex by remember { mutableIntStateOf(-1) }
+            LaunchedEffect(selectedRowIndex) {
+              if (lastSelectedRowIndex >= 0 && selectedRowIndex >= 0 && lastSelectedRowIndex != selectedRowIndex) {
+                selectionScale.animateTo(SIDEBAR_SELECTION_PULSE_SCALE, tween(110, easing = FastOutSlowInEasing))
+                selectionScale.animateTo(1f, tween(200, easing = LinearOutSlowInEasing))
+              }
+              lastSelectedRowIndex = selectedRowIndex
+            }
+            Box(
+              modifier =
+                Modifier
+                  .fillMaxWidth()
+                  .drawBehind {
+                    if (pageRowHeightPx > 0 && selectionAlpha > 0f) {
+                      scale(
+                        scaleX = selectionScale.value,
+                        scaleY = selectionScale.value,
+                        pivot = Offset(size.width / 2f, selectionTop + pageRowHeightPx / 2f),
+                      ) {
+                        drawRoundRect(
+                          color = palette.selection.copy(alpha = palette.selection.alpha * selectionAlpha),
+                          topLeft = Offset(0f, selectionTop),
+                          size = Size(size.width, pageRowHeightPx.toFloat()),
+                          cornerRadius = CornerRadius(ClawGlassMenuDefaults.CornerRadius.toPx()),
+                        )
+                      }
+                    }
                   },
-                  onDragActiveChange = onDragActiveChange,
-                )
+            ) {
+              Column {
+                pageRows.forEach { destination ->
+                  key(destination.stableId) {
+                    SidebarNavigationRow(
+                      destination = destination,
+                      rowHost = rowHost,
+                      palette = palette,
+                      modifier = Modifier.onSizeChanged { pageRowHeightPx = it.height },
+                      onClick = { onSelectDestination(destination) },
+                      onMove = { direction ->
+                        viewModel.setSidebarPageOrder(
+                          moveSidebarDestination(
+                            pageIds = pageOrder,
+                            destinationId = destination.stableId,
+                            direction = direction,
+                            visiblePageIds = visiblePageIdSet,
+                          ),
+                        )
+                      },
+                      onDragActiveChange = onDragActiveChange,
+                    )
+                  }
+                }
               }
             }
           }
@@ -1194,7 +1265,6 @@ private fun SidebarPagesHeader(
                 SidebarNavigationRow(
                   destination = destination,
                   rowHost = rowHost,
-                  selected = false,
                   pinned = visible,
                   palette = palette,
                   onClick = { onVisibilityChange(destination, !visible) },

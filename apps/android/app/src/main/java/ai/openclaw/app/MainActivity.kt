@@ -1,8 +1,11 @@
 package ai.openclaw.app
 
 import ai.openclaw.app.i18n.nativeString
+import ai.openclaw.app.ui.LocalResolvedAppearanceIsDark
 import ai.openclaw.app.ui.OpenClawTheme
 import ai.openclaw.app.ui.RootScreen
+import ai.openclaw.app.ui.design.ClawDesignTheme
+import ai.openclaw.app.ui.design.ClawTheme
 import ai.openclaw.app.ui.design.ProvideAppTextScale
 import android.content.Intent
 import android.os.Bundle
@@ -11,6 +14,11 @@ import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
@@ -25,9 +33,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -77,20 +82,22 @@ class MainActivity : AppCompatActivity() {
       }
 
       val currentViewModel = activeViewModel
-      if (currentViewModel == null) {
-        OpenClawTheme {
-          StartupSurface()
-        }
-      } else {
-        val appearanceThemeMode by currentViewModel.appearanceThemeMode.collectAsState()
-        val appearanceTextScale by currentViewModel.appearanceTextScale.collectAsState()
-        OpenClawTheme(themeMode = appearanceThemeMode) {
-          // Applied at the single app root so onboarding, the shell, and every
-          // nested screen share one text scale.
-          ProvideAppTextScale(scale = appearanceTextScale) {
-            RootScreen(viewModel = currentViewModel)
+      Box(modifier = Modifier.fillMaxSize()) {
+        if (currentViewModel != null) {
+          val appearanceThemeMode by currentViewModel.appearanceThemeMode.collectAsState()
+          val appearanceTextScale by currentViewModel.appearanceTextScale.collectAsState()
+          OpenClawTheme(themeMode = appearanceThemeMode) {
+            // Applied at the single app root so onboarding, the shell, and every
+            // nested screen share one text scale.
+            ProvideAppTextScale(scale = appearanceTextScale) {
+              RootScreen(viewModel = currentViewModel)
+            }
           }
         }
+        // The mask layers above the content instead of swapping with it: it fades out over the
+        // canvas-colored shell, so warm-up ends in one continuous reveal and nothing the shell
+        // draws (embedded WebViews included) gets pushed into an alpha group.
+        StartupMask(visible = currentViewModel == null)
       }
     }
   }
@@ -374,22 +381,48 @@ internal class MainActivityRuntimeUiStarter {
   }
 }
 
+/** Long enough to read as a hand-off, short enough that warm-up never feels like a wait. */
+private const val STARTUP_MASK_FADE_MS = 600
+
+/** Startup mask that fades away once the real content composes underneath it. */
+@Composable
+private fun StartupMask(visible: Boolean) {
+  AnimatedVisibility(
+    visible = visible,
+    // Cold start mounts the mask already visible, so the enter lane never plays. Stating it
+    // keeps an Activity recreation (locale change) from fading a brand card back in first.
+    enter = EnterTransition.None,
+    exit = fadeOut(tween(durationMillis = STARTUP_MASK_FADE_MS, easing = FastOutSlowInEasing)),
+    modifier = Modifier.fillMaxSize(),
+  ) {
+    StartupSurface()
+  }
+}
+
+/**
+ * Paints the mask from the same canvas/text tokens the shell draws with, resolved for the device
+ * appearance, so the hand-off carries no color jump. The persisted appearance is only readable
+ * once prefs are warm, which is exactly when this mask leaves.
+ */
 @Composable
 private fun StartupSurface() {
-  Surface(
-    modifier = Modifier.fillMaxSize(),
-    color = Color.Black,
-    contentColor = Color.White,
-  ) {
-    Box(
-      modifier = Modifier.fillMaxSize(),
-      contentAlignment = Alignment.Center,
-    ) {
-      Text(
-        text = "OPENCLAW",
-        fontSize = 22.sp,
-        fontWeight = FontWeight.Medium,
-      )
+  OpenClawTheme(themeMode = AppearanceThemeMode.System) {
+    ClawDesignTheme(dark = LocalResolvedAppearanceIsDark.current) {
+      Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = ClawTheme.colors.canvas,
+        contentColor = ClawTheme.colors.text,
+      ) {
+        Box(
+          modifier = Modifier.fillMaxSize(),
+          contentAlignment = Alignment.Center,
+        ) {
+          Text(
+            text = "OpenClawX",
+            style = ClawTheme.type.display,
+          )
+        }
+      }
     }
   }
 }

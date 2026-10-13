@@ -3,6 +3,10 @@
     <style name="Theme.OpenClawNode" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- Dark half: the system splash and first window background use the dark canvas, with the
+             light-status-bar flag left off so icons stay readable on it. -->
+        <item name="android:windowBackground">@color/splash_background</item>
+        <item name="android:windowSplashScreenBackground">@color/splash_background</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

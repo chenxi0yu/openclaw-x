@@ -24,6 +24,20 @@ Baseline traits for the Claw family:
 - Hairline borders and layered surfaces for structure; near-zero shadow.
 - Medium/semibold typography (no thin text).
 - Divider-and-spacing layout over card nesting.
+- Startup hand-off stays on one color: the system splash, the first window background
+  (`@color/splash_background`, day and night), and the `MainActivity` startup mask all paint the
+  Claw canvas for the device appearance. The mask fades out over the shell instead of swapping
+  with it, and never hardcodes a black or white fill.
+- Route swaps animate through `design/ClawPagePush.kt`, never per-screen slide specs. A sidebar
+  destination change fades the arriving page in (`clawPageFade`) after the selection card travels
+  to the tapped row, and the drawer retracts only once that fade is done, so it never reveals a
+  page mid-transition. The card swells on the way out and deflates into the new slot, and the
+  arriving page pulls into focus from a 16dp blur whose tail outlasts the drawer, so the
+  sharpening is the last thing you see. Horizontal travel belongs to the drawer alone — a second
+  slide underneath it reads as two panels fighting, and dropping rather than fading the outgoing
+  page keeps hosted WebViews out of an animated alpha group. In-page pushes (`clawPagePush`) still
+  slide: Settings Home and its details have no drawer, and the parallax exit is what makes them
+  read as sheets.
 
 ## 3. Core Tokens
 

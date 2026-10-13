@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark half of the startup canvas, mirroring the Claw dark canvas token in ClawTheme.kt. -->
+    <color name="splash_background">#0E1015</color>
+</resources>

@@ -22,6 +22,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.drag
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -272,9 +273,10 @@ internal fun SidebarActionRow(
 internal fun SidebarNavigationRow(
   destination: SidebarDestination,
   rowHost: SidebarRowHost,
-  selected: Boolean,
   pinned: Boolean? = null,
   palette: SidebarPalette,
+  // The list paints the traveling selection card, so a row only ever draws its own drag lift.
+  modifier: Modifier = Modifier,
   onClick: () -> Unit,
   onMove: (Int) -> Unit,
   onDragActiveChange: (Boolean) -> Unit,
@@ -288,6 +290,9 @@ internal fun SidebarNavigationRow(
   var dragOffset by remember(destination) { mutableFloatStateOf(0f) }
   var dragging by remember(destination) { mutableStateOf(false) }
   var dragGeneration by remember(destination) { mutableLongStateOf(0L) }
+  // The traveling selection card is the press feedback. A ripple would wash the row the card is
+  // about to land on with a second, faster gray that reads as a separate event.
+  val rowInteractionSource = remember { MutableInteractionSource() }
   val visualDragging = dragging && dragGeneration == rowHost.generation
   val finishDrag = {
     dragOffset = 0f
@@ -299,7 +304,7 @@ internal fun SidebarNavigationRow(
 
   Box(
     modifier =
-      Modifier
+      modifier
         .fillMaxWidth()
         .zIndex(if (visualDragging) 1f else 0f)
         .graphicsLayer {
@@ -339,8 +344,13 @@ internal fun SidebarNavigationRow(
           .fillMaxWidth()
           .heightIn(min = 48.dp)
           .clip(RoundedCornerShape(ClawGlassMenuDefaults.CornerRadius))
-          .background(if (selected) palette.selection else if (visualDragging) palette.elevated else Color.Transparent)
-          .clickable(role = Role.Button, onClick = onClick)
+          .background(if (visualDragging) palette.elevated else Color.Transparent)
+          .clickable(
+            interactionSource = rowInteractionSource,
+            indication = null,
+            role = Role.Button,
+            onClick = onClick,
+          )
           .padding(horizontal = 12.dp, vertical = 8.dp),
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(10.dp),

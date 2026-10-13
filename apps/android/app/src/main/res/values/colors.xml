@@ -2,5 +2,8 @@
 <resources>
     <!-- flat fallback / splash background, matches the glass tile -->
     <color name="ic_launcher_background">#FCFCFD</color>
-    <color name="splash_background">#F7F6F4</color>
+    <!-- Startup surfaces only: the system splash, the first window background, and the Compose
+         mask all paint this, so cold start never shows a color that the app then replaces.
+         Mirrors the Claw canvas token; values-night carries the dark half. -->
+    <color name="splash_background">#F7F7F9</color>
 </resources>

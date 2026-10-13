@@ -2,6 +2,11 @@
     <style name="Theme.OpenClawNode" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">false</item>
+        <!-- Cold start runs before Compose can paint, so the system splash and the first window
+             background carry the light canvas themselves. The mask and shell then hand off to the
+             same color instead of replacing a default one. -->
+        <item name="android:windowBackground">@color/splash_background</item>
+        <item name="android:windowSplashScreenBackground">@color/splash_background</item>
+        <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>
