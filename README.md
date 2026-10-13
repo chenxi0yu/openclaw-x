@@ -16,13 +16,13 @@
 
 ## 界面一览
 
-| 对话与排版 | 侧边栏抽屉 | 上下文卡片 |
-| :--: | :--: | :--: |
-| <img src="fork-assets/01-chat-markdown.png" width="230" /> | <img src="fork-assets/02-sidebar-push-drawer.png" width="230" /> | <img src="fork-assets/03-context-card.png" width="230" /> |
+| 对话与排版 | 顶栏玻璃 | 侧边栏抽屉 | 上下文卡片 |
+| :--: | :--: | :--: | :--: |
+| <img src="fork-assets/01-chat-markdown.png" width="230" /> | <img src="fork-assets/06-topbar-glass.gif" width="230" /> | <img src="fork-assets/02-sidebar-push-drawer.png" width="230" /> | <img src="fork-assets/03-context-card.png" width="230" /> |
 
-| 模型选择 | 思考链与工具链 | 运行状态上岛 |
+| 输入栏 | 思考链与工具链 | 运行状态上岛 |
 | :--: | :--: | :--: |
-| <img src="fork-assets/04-model-picker.png" width="230" /> | <img src="fork-assets/05-reasoning-tools.png" width="230" /> | <img src="fork-assets/00-live-island.png" width="320" /> |
+| <img src="fork-assets/07-composer-glass.gif" width="230" /> | <img src="fork-assets/05-reasoning-tools.png" width="230" /> | <img src="fork-assets/00-live-island.png" width="320" /> |
 
 ## 功能特性
 
