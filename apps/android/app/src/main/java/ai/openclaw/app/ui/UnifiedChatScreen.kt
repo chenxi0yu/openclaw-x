@@ -24,6 +24,8 @@ internal fun UnifiedChatShellScreen(
   onOpenDashboard: (String) -> Unit,
   onOpenGatewaySettings: () -> Unit,
   onOpenProvidersModels: () -> Unit,
+  onSelectionModeChange: (Boolean) -> Unit = {},
+  onSharePanelChange: (Boolean) -> Unit = {},
   tabletopPanes: TabletopPaneBounds? = null,
   features: List<DisplayFeature> = emptyList(),
 ) {
@@ -55,6 +57,8 @@ internal fun UnifiedChatShellScreen(
       onOpenProvidersModels = onOpenProvidersModels,
       tabletopPanes = tabletopPanes,
       features = features,
+      onSelectionModeChange = onSelectionModeChange,
+      onSharePanelChange = onSharePanelChange,
     )
   }
 }

@@ -21,8 +21,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Ok as MiuixOk
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -460,6 +460,7 @@ internal fun ClawGlassMenuItem(
   label: String,
   onClick: () -> Unit,
   icon: ImageVector? = null,
+  leading: (@Composable () -> Unit)? = null,
   trailing: String? = null,
   selected: Boolean = false,
   danger: Boolean = false,
@@ -509,7 +510,9 @@ internal fun ClawGlassMenuItem(
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(12.dp),
   ) {
-    if (icon != null) {
+    if (leading != null) {
+      leading()
+    } else if (icon != null) {
       Icon(
         imageVector = icon,
         contentDescription = null,
@@ -535,7 +538,7 @@ internal fun ClawGlassMenuItem(
     }
     if (selected) {
       Icon(
-        imageVector = Icons.Default.Check,
+        imageVector = MiuixIcons.Medium.MiuixOk,
         contentDescription = null,
         tint = colors.primary,
         modifier = Modifier.size(16.dp),

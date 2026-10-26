@@ -1,27 +1,17 @@
 package ai.openclaw.app.ui.chat
 
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.unit.Dp
@@ -31,30 +21,15 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Lucide glyphs used by the tool chain.
  *
- * Lucide draws on a 24x24 grid with a 2px round stroke, so the raw `d` strings
- * are kept verbatim. They are parsed to [Path]s at draw time rather than baked
- * into a vector drawable because the running state trims each stroke by length
- * (see [ToolIconAnimation]), which needs a real path rather than a rendered
- * bitmap of one.
+ * Lucide draws on a 24x24 grid with a round stroke, so the raw `d` strings are
+ * kept verbatim and parsed to [Path]s at draw time. The glyphs are static: the
+ * "still running" signal belongs to the row label's shimmer, not to the icon.
  */
 internal data class LucideGlyph(
   val paths: List<String>,
-  /** Index into [paths] of the path the animation moves, or null for a whole-glyph move. */
-  val animatedPath: Int? = null,
-  /**
-   * A stroke that never moves while [paths] animates around it.
-   *
-   * Held apart from [paths] because some glyphs animate only their interior: a
-   * spinner reads as a spinner exactly because its ring holds still.
-   */
-  val ringPath: String? = null,
 )
 
-/**
- * Compose has no circle primitive in path data. Two half arcs reproduce one
- * while keeping a single continuous start point, which matters once a draw-on
- * animation trims the stroke by length.
- */
+/** Compose has no circle primitive in path data; two half arcs reproduce one. */
 private fun circlePath(
   cx: Float,
   cy: Float,
@@ -70,7 +45,6 @@ private val TERMINAL =
       "M12 19h8",
       "m4 17 6-6-6-6",
     ),
-    animatedPath = 0,
   )
 
 private val FILE_TEXT =
@@ -82,7 +56,6 @@ private val FILE_TEXT =
       "M16 13H8",
       "M16 17H8",
     ),
-    animatedPath = 2,
   )
 
 private val SQUARE_PEN =
@@ -101,7 +74,6 @@ private val FILE_PLUS =
       "M9 15h6",
       "M12 18v-6",
     ),
-    animatedPath = 2,
   )
 
 private val FILE_SEARCH =
@@ -112,29 +84,23 @@ private val FILE_SEARCH =
       circlePath(11.5f, 14.5f, 2.5f),
       "M13.3 16.3 15 18",
     ),
-    animatedPath = 3,
   )
 
 /**
- * A ring with a core and two satellites riding it.
+ * Lucide `sparkles` for the thinking row: one large four-point star, a plus at
+ * the top-right and a small ring at the bottom-left.
  *
- * The ring is what makes the glyph legible at rest. Without it the same three
- * circles are just three dots on a diagonal, and a finished thought loses the
- * "orbit" reading entirely; the ring says "this is a path" whether or not
- * anything is currently moving along it.
+ * The assistant-app convention for "AI reasoning", drawn with the same
+ * round-joined stroke as the tool glyphs so the chain looks like one family.
  */
-private val ORBIT =
+private val STAR =
   LucideGlyph(
-    // Centre core first, then the two satellites, which sit on the ring at
-    // radius 10 — (19,5) and (5,19) are both ~9.9 from (12,12).
-    paths =
-      listOf(
-        circlePath(12f, 12f, 3f),
-        circlePath(19f, 5f, 2f),
-        circlePath(5f, 19f, 2f),
-      ),
-    // Never rotates: it is the path the satellites travel along.
-    ringPath = circlePath(12f, 12f, 10f),
+    listOf(
+      "M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z",
+      "M20 2v4",
+      "M22 4h-4",
+      circlePath(4f, 20f, 2f),
+    ),
   )
 
 private val GLOBE =
@@ -144,7 +110,6 @@ private val GLOBE =
       "M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20",
       "M2 12h20",
     ),
-    animatedPath = 1,
   )
 
 private val SEARCH =
@@ -153,7 +118,6 @@ private val SEARCH =
       "m21 21-4.34-4.34",
       circlePath(11f, 11f, 8f),
     ),
-    animatedPath = 0,
   )
 
 private val CIRCLE_DASHED =
@@ -201,32 +165,6 @@ internal fun lucideGlyph(kind: CompletedToolKind): LucideGlyph =
   }
 
 /**
- * Which motion a running row plays.
- *
- * The source library drives these with framer-motion keyframes; each entry here
- * is the same keyframe list re-expressed for [InfiniteTransition]. Keeping one
- * enum per motion (rather than one per glyph) is what lets a glyph be swapped
- * without also rewriting its animation.
- */
-private enum class ToolIconAnimation {
-  /** A whole-glyph tilt, for tools with no single meaningful part. */
-  Tilt,
-
-  /** A short dash drawn and erased along one path. */
-  DrawOn,
-
-  /** A steady spin, for verbs whose meaning is "still working". */
-  Spin,
-}
-
-private fun animationFor(kind: CompletedToolKind): ToolIconAnimation =
-  when (kind) {
-    CompletedToolKind.Progress -> ToolIconAnimation.Spin
-    CompletedToolKind.Other -> ToolIconAnimation.Tilt
-    else -> ToolIconAnimation.DrawOn
-  }
-
-/**
  * Parsed paths are shared across rows: a long tool chain re-issues the same
  * handful of glyphs on every recomposition, and parsing is not cheap.
  */
@@ -239,12 +177,19 @@ private fun parsedGlyph(kind: CompletedToolKind): List<Path> =
 
 /**
  * The same cache keyed by raw `d` string, for the two glyphs that sit outside
- * the [CompletedToolKind] mapping: the thinking orbit and the steps layers.
+ * the [CompletedToolKind] mapping: the thinking star and the steps layers.
  */
 private val parsedPathCache = ConcurrentHashMap<String, Path>()
 
 private fun parsedPathData(data: List<String>): List<Path> =
   data.map { d -> parsedPathCache.getOrPut(d) { PathParser().parsePathString(d).toPath() } }
+
+/**
+ * Stroke width on the 24-unit grid. Lucide's stock 2f thins out badly once the
+ * glyph is scaled into an 18dp chain row; 3f is the extra-bold step and keeps
+ * the small icons readable at a glance.
+ */
+private const val LUCIDE_STROKE = 3f
 
 /** Draws one stroke glyph, scaled from the 24x24 grid onto the canvas. */
 private fun DrawScope.drawLucide(
@@ -257,42 +202,15 @@ private fun DrawScope.drawLucide(
   // coordinates are in the 0..24 grid. Mixing the two throws the shape off
   // canvas and leaves only a corner visible — hence Offset.Zero everywhere.
   scale(glyphScale, glyphScale, Offset.Zero) {
-    val stroke = Stroke(width = 2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+    val stroke = Stroke(width = LUCIDE_STROKE, cap = StrokeCap.Round, join = StrokeJoin.Round)
     paths.forEach { path -> drawPath(path = path, color = color, style = stroke) }
   }
 }
 
 /**
- * Draws one path trimmed to [length] (0..1) of its own arc length.
- *
- * Measuring via [PathMeasure] is what lets a partly drawn stroke start at the
- * path's own start point — the same semantics the source library gets from
- * animating `pathLength` / `pathOffset`.
- */
-private fun DrawScope.drawTrimmedPath(
-  path: Path,
-  color: Color,
-  strokeWidth: Float,
-  length: Float,
-) {
-  val measure = PathMeasure()
-  measure.setPath(path, false)
-  val total = measure.length
-  if (total <= 0f) return
-  val visible = (total * length).coerceIn(0f, total)
-  val trimmed = Path()
-  measure.getSegment(0f, visible, trimmed, true)
-  drawPath(
-    path = trimmed,
-    color = color,
-    style = Stroke(strokeWidth, cap = StrokeCap.Round, join = StrokeJoin.Round),
-  )
-}
-
-/**
- * One tool row's icon: static when the call has settled, animated while it
- * runs. The caller's [tint] already carries the settled/running distinction
- * (muted vs accent), so the animation is the only extra signal.
+ * One tool row's icon. Static by design: movement belongs to the label's
+ * shimmer, so the glyph keeps the same silhouette before and after a call
+ * finishes.
  */
 @Composable
 internal fun LucideToolIcon(
@@ -300,162 +218,38 @@ internal fun LucideToolIcon(
   modifier: Modifier = Modifier,
   tint: Color,
   size: Dp = 16.dp,
-  running: Boolean = false,
 ) {
-  val glyph = remember(kind) { lucideGlyph(kind) }
   val paths = remember(kind) { parsedGlyph(kind) }
-  val animation = animationFor(kind)
-  val transition = rememberInfiniteTransition(label = "toolIcon")
-  val phase by
-    transition.animateFloat(
-      initialValue = 0f,
-      targetValue = 1f,
-      animationSpec =
-        infiniteRepeatable(
-          animation =
-            tween(
-              durationMillis =
-                when (animation) {
-                  ToolIconAnimation.Spin -> 2200
-                  ToolIconAnimation.DrawOn -> 1800
-                  ToolIconAnimation.Tilt -> 1600
-                },
-              easing = if (animation == ToolIconAnimation.Spin) LinearEasing else FastOutSlowInEasing,
-            ),
-          repeatMode = RepeatMode.Restart,
-        ),
-      label = "phase",
-    )
-
   Canvas(modifier = modifier.size(size)) {
-    val animatedIndex = glyph.animatedPath
-    // Settled rows keep the full stroke and lose the motion entirely: a
-    // finished call should read as done, not as a still frame of working.
-    if (!running || animatedIndex == null) {
-      drawLucide(paths = paths, color = tint)
-      return@Canvas
-    }
-    val glyphScale = this.size.minDimension / 24f
-    // Tilt and spin rotate the whole glyph, so the canvas has to be mapped to
-    // the 24x24 grid first; rotating inside the scaled pass would spin the
-    // stroke width along with the shape.
-    when (animation) {
-      ToolIconAnimation.DrawOn -> {
-        val stroke = Stroke(2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-        scale(glyphScale, glyphScale, Offset.Zero) {
-          paths.forEachIndexed { index, path ->
-            if (index != animatedIndex) {
-              drawPath(path = path, color = tint, style = stroke)
-            }
-          }
-          // Breathes between a full stroke and roughly a sixth of one, so the
-          // shape stays legible instead of blinking out at the trough.
-          drawTrimmedPath(paths[animatedIndex], tint, 2f, 1f - 0.16f * phase)
-        }
-      }
-      ToolIconAnimation.Spin -> {
-        val pivot = Offset(12f * glyphScale, 12f * glyphScale)
-        rotate(degrees = 360f * phase, pivot = pivot) {
-          drawLucide(paths = paths, color = tint)
-        }
-      }
-      ToolIconAnimation.Tilt -> {
-        val pivot = Offset(12f * glyphScale, 12f * glyphScale)
-        // Eases out to a small lean and back, like a wrench being turned.
-        val degrees = 12f * kotlin.math.sin(phase * 2f * Math.PI).toFloat()
-        rotate(degrees = degrees, pivot = pivot) {
-          drawLucide(paths = paths, color = tint)
-        }
-      }
-    }
+    drawLucide(paths = paths, color = tint)
   }
 }
 
 /**
- * Runs the two satellites around the ring while the model is thinking.
- *
- * Only the satellites move. The ring and the core are drawn outside the
- * rotation, which is what makes the glyph still read as an orbit once thinking
- * stops: the path stays drawn, so a finished thought is an orbit at rest rather
- * than three loose dots. While thinking, the ring is the fixed frame the
- * satellites sweep along, so the motion reads as circulation rather than spin.
+ * Thinking row's mark: a star, held still. Motion now lives in the label's
+ * shimmer, so the glyph keeps one silhouette from "思考中…" to "思考完成".
  */
 @Composable
 internal fun LucideThinkingIcon(
   modifier: Modifier = Modifier,
   tint: Color,
   size: Dp = 16.dp,
-  running: Boolean = true,
 ) {
-  val core = remember { parsedPathData(listOf(ORBIT.paths[0])) }
-  val satellites = remember { parsedPathData(ORBIT.paths.drop(1)) }
-  val ring = remember { parsedPathData(listOf(ORBIT.ringPath!!)) }
-  val stroke = remember { Stroke(2f, cap = StrokeCap.Round, join = StrokeJoin.Round) }
-  if (!running) {
-    // At rest the whole glyph is drawn still: ring, core and satellites all
-    // keep their places, so the silhouette is the orbit itself.
-    Canvas(modifier = modifier.size(size)) {
-      drawLucide(paths = ring + satellites + core, color = tint)
-    }
-    return
-  }
-  val transition = rememberInfiniteTransition(label = "thinkingIcon")
-  val phase by
-    transition.animateFloat(
-      initialValue = 0f,
-      targetValue = 360f,
-      // Slower than a spinner on purpose: a satellite that laps the ring in a
-      // second reads as a loading widget, while one that takes its time reads
-      // as something actually going around.
-      animationSpec = infiniteRepeatable(tween(durationMillis = 2600, easing = LinearEasing)),
-      label = "orbit",
-    )
+  val paths = remember { parsedPathData(STAR.paths) }
   Canvas(modifier = modifier.size(size)) {
-    scale(this.size.minDimension / 24f, this.size.minDimension / 24f, Offset.Zero) {
-      // Ring and core first so the satellites pass over them.
-      ring.forEach { path -> drawPath(path = path, color = tint, style = stroke) }
-      core.forEach { path -> drawPath(path = path, color = tint, style = stroke) }
-      rotate(degrees = phase, pivot = Offset(12f, 12f)) {
-        satellites.forEach { path -> drawPath(path = path, color = tint, style = stroke) }
-      }
-    }
+    drawLucide(paths = paths, color = tint)
   }
 }
 
-/**
- * Draws the stacked-sheets glyph used by the collapsed step-chain header.
- *
- * The three sheets drift in turn while the chain is collapsed, which is the
- * same "still collecting steps" signal the header's count already carries; once
- * the reader expands it the layers hold still and let the rows speak.
- */
+/** Stacked-sheets glyph for the collapsed step-chain header; held still. */
 @Composable
 internal fun LucideStepsIcon(
   modifier: Modifier = Modifier,
   tint: Color,
   size: Dp = 16.dp,
-  running: Boolean = false,
 ) {
   val paths = remember { parsedPathData(LAYERS.paths) }
-  val transition = rememberInfiniteTransition(label = "stepsIcon")
-  val phase by
-    transition.animateFloat(
-      initialValue = 0f,
-      targetValue = 1f,
-      animationSpec = infiniteRepeatable(tween(durationMillis = 2400, easing = FastOutSlowInEasing)),
-      label = "layers",
-    )
   Canvas(modifier = modifier.size(size)) {
-    val glyphScale = this.size.minDimension / 24f
-    scale(glyphScale, glyphScale, Offset.Zero) {
-      val stroke = Stroke(2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-      paths.forEachIndexed { index, path ->
-        // Each sheet leads the one below it by a third of the cycle, so the
-        // stack reads as a wave rather than pulsing in unison.
-        val local = if (running) (phase + index / 3f).mod(1f) else 0f
-        val alpha = if (running) 0.45f + 0.55f * kotlin.math.sin(local * Math.PI).toFloat() else 1f
-        drawPath(path = path, color = tint.copy(alpha = tint.alpha * alpha), style = stroke)
-      }
-    }
+    drawLucide(paths = paths, color = tint)
   }
 }

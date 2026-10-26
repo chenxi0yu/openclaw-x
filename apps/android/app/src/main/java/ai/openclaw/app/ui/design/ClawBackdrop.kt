@@ -86,11 +86,14 @@ internal fun Modifier.clawBackdropTopBar(backdrop: Backdrop?): Modifier {
  *
  * Callers pass the backdrop only when it exists; the modifier falls back to the
  * plain surface fill so a missing source never paints a transparent hole.
+ * The glass draws its own chrome in [shape] — an outer `clip` never reaches it,
+ * so non-pill surfaces must pass their shape here explicitly.
  */
 internal fun Modifier.clawLiquidButton(
   backdrop: Backdrop?,
   surface: Color,
   dark: Boolean,
+  shape: RoundedCornerShape = RoundedCornerShape(percent = 50),
 ): Modifier {
   if (backdrop == null) {
     return background(surface)
@@ -98,7 +101,7 @@ internal fun Modifier.clawLiquidButton(
 
   return drawBackdrop(
     backdrop = backdrop,
-    shape = { RoundedCornerShape(percent = 50) },
+    shape = { shape },
     effects = {
       vibrancy()
       blur(3.dp.toPx())

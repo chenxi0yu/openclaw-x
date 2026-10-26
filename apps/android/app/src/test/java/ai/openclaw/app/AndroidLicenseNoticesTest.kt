@@ -108,6 +108,7 @@ class AndroidLicenseNoticesTest {
         "Markdown",
         "Marked",
         "Mermaid",
+        "Miuix Icons",
         "nibor autolink",
         "OkHttp and Okio",
         "path-data-parser",

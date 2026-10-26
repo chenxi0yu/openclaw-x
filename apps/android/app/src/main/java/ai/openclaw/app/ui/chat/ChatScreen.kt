@@ -11,6 +11,7 @@ import ai.openclaw.app.R
 import ai.openclaw.app.SHARED_AUDIO_DOCUMENT_MIME_TYPES
 import ai.openclaw.app.SHARED_VIDEO_MIME_TYPES
 import ai.openclaw.app.SessionCatalog
+import ai.openclaw.app.SessionShareOutcome
 import ai.openclaw.app.chat.ChatCommandEntry
 import ai.openclaw.app.chat.ChatComposerOwner
 import ai.openclaw.app.chat.ChatController
@@ -53,6 +54,7 @@ import ai.openclaw.app.i18n.joinedNativeText
 import ai.openclaw.app.i18n.nativeString
 import ai.openclaw.app.i18n.nativeText
 import ai.openclaw.app.i18n.resolveNativeTextResource
+import ai.openclaw.app.sessionShareFailureText
 import ai.openclaw.app.i18n.verbatimText
 import ai.openclaw.app.operatorScopesAllowAdmin
 import ai.openclaw.app.operatorScopesAllowWrite
@@ -74,10 +76,8 @@ import ai.openclaw.app.ui.design.ClawGlassSurface
 import ai.openclaw.app.ui.design.ClawJumpToLatestButton
 import ai.openclaw.app.ui.design.ClawListItem
 import ai.openclaw.app.ui.design.LucideCameraIcon
-import ai.openclaw.app.ui.design.LucideEllipsisIcon
 import ai.openclaw.app.ui.design.LucideImageIcon
 import ai.openclaw.app.ui.design.LucidePaperclipIcon
-import ai.openclaw.app.ui.design.LucideSquarePenIcon
 import ai.openclaw.app.ui.design.LucideVideoIcon
 import ai.openclaw.app.ui.design.ClawLoadingState
 import ai.openclaw.app.ui.design.ClawPanel
@@ -107,6 +107,7 @@ import ai.openclaw.app.ui.sessionPresentationTitle
 import ai.openclaw.app.ui.sidebarCatalogHosts
 import android.net.Uri
 import android.os.SystemClock
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -146,6 +147,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -165,10 +167,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
@@ -176,7 +176,6 @@ import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GppMaybe
@@ -186,7 +185,6 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Policy
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -194,6 +192,7 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Videocam
@@ -301,6 +300,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import top.yukonga.miuix.kmp.icon.MiuixIcons
 import java.io.File
 import java.text.DateFormat
 import java.time.Instant
@@ -311,6 +311,13 @@ import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import top.yukonga.miuix.kmp.icon.extended.Add as MiuixAdd
+import top.yukonga.miuix.kmp.icon.extended.ChevronForward as MiuixChevronForward
+import top.yukonga.miuix.kmp.icon.extended.Edit as MiuixEdit
+import top.yukonga.miuix.kmp.icon.extended.Home as MiuixHome
+import top.yukonga.miuix.kmp.icon.extended.More as MiuixMore
+import top.yukonga.miuix.kmp.icon.extended.Refresh as MiuixRefresh
+import top.yukonga.miuix.kmp.icon.extended.Timer as MiuixTimer
 
 /** Returns a pending assistant prompt only when chat can accept it immediately. */
 internal fun resolvePendingAssistantAutoSend(
@@ -398,6 +405,10 @@ internal fun ChatScreen(
   onOpenProvidersModels: () -> Unit = onOpenGatewaySettings,
   tabletopPanes: TabletopPaneBounds? = null,
   features: List<DisplayFeature> = emptyList(),
+  /** Lets the shell stop owning drawer gestures while a modal chat picker is open. */
+  onSelectionModeChange: (Boolean) -> Unit = {},
+  /** Lets the shell hand the left-edge swipe to the share card while it is open. */
+  onSharePanelChange: (Boolean) -> Unit = {},
 ) {
   val messages by viewModel.chatMessages.collectAsState()
   val transcriptAnchor by viewModel.chatTranscriptAnchor.collectAsState()
@@ -538,6 +549,8 @@ internal fun ChatScreen(
   val lifecycleState by lifecycleOwner.lifecycle.currentStateFlow.collectAsState()
   val resolver = context.applicationContext.contentResolver
   val scope = rememberCoroutineScope()
+  val focusManager = LocalFocusManager.current
+  val keyboardController = LocalSoftwareKeyboardController.current
   val composerState = remember(viewModel) { viewModel.chatComposerState }
   val inputDrafts = composerState.textDrafts
   val imagePickerOwnerCheckpoint =
@@ -663,6 +676,39 @@ internal fun ChatScreen(
     }
   }
   var detailsExpanded by rememberSaveable { mutableStateOf(false) }
+  // Batch share picker: null means browsing; a set means the transcript is in
+  // selection mode with those message ids checked. Session-scoped so a switch
+  // can never carry a selection into another conversation.
+  var shareSelection by remember(sessionKey) { mutableStateOf<Set<String>?>(null) }
+  // Every selectable bubble in the session at the moment the picker opened. The
+  // transcript owns the timeline, so it hands the candidate set up with the seed.
+  var shareSelectionCandidates by remember(sessionKey) { mutableStateOf<Set<String>>(emptySet()) }
+  val shareSelectionActive = shareSelection != null
+  val currentSelectionModeCallback by rememberUpdatedState(onSelectionModeChange)
+  LaunchedEffect(shareSelectionActive) {
+    if (shareSelectionActive) {
+      detailsExpanded = false
+      // Selection is a modal surface: the keyboard must not stay up behind an
+      // input bar the user can no longer reach.
+      focusManager.clearFocus(force = true)
+      keyboardController?.hide()
+    }
+    currentSelectionModeCallback(shareSelectionActive)
+  }
+  fun clearShareSelection() {
+    shareSelection = null
+    shareSelectionCandidates = emptySet()
+  }
+  BackHandler(enabled = shareSelectionActive) { clearShareSelection() }
+  // Share card shown after confirm. Nothing is created until a link action is
+  // tapped; blank-tap/back dismissal just closes the card.
+  var sharePanelPayload by remember(sessionKey) { mutableStateOf<ChatSharePanelPayload?>(null) }
+  var shareLinkBusy by remember { mutableStateOf<ChatShareLinkAction?>(null) }
+  val currentSharePanelCallback by rememberUpdatedState(onSharePanelChange)
+  LaunchedEffect(sharePanelPayload != null) {
+    currentSharePanelCallback(sharePanelPayload != null)
+  }
+  BackHandler(enabled = sharePanelPayload != null) { sharePanelPayload = null }
   var sendMessageTooLong by rememberSaveable(composerOwner) { mutableStateOf(false) }
   var sendCheckpointFull by rememberSaveable(composerOwner) { mutableStateOf(false) }
 
@@ -1017,13 +1063,13 @@ internal fun ChatScreen(
     val newChatInWorktreeMenuLabel = stringResource(R.string.new_chat_in_worktree)
     ClawGlassMenuItem(
       label = nativeString("Refresh chat"),
-      icon = Icons.Default.Refresh,
+      icon = MiuixIcons.Medium.MiuixRefresh,
       onClick = { viewModel.refreshChat(); viewModel.refreshChatSessions(limit = 100) },
     )
     if (sessionBranches.size > 1) {
       ClawGlassMenuItem(
         label = nativeString("Switch branch"),
-        icon = Icons.Default.ArrowDropDown,
+        icon = MiuixIcons.Medium.MiuixChevronForward,
         enabled = viewModel.isCurrentChatBranchTarget(composerOwner, selectionGeneration),
         onClick = {
           detailsExpanded = false
@@ -1033,7 +1079,7 @@ internal fun ChatScreen(
     }
     ClawGlassMenuItem(
       label = nativeString("Dashboard"),
-      icon = Icons.Default.Dashboard,
+      icon = MiuixIcons.Medium.MiuixHome,
       onClick = {
         detailsExpanded = false
         onOpenDashboard(sessionKey)
@@ -1041,7 +1087,7 @@ internal fun ChatScreen(
     )
     ClawGlassMenuItem(
       label = nativeString("Background tasks"),
-      icon = Icons.Default.HourglassEmpty,
+      icon = MiuixIcons.Medium.MiuixTimer,
       onClick = {
         detailsExpanded = false
         backgroundTasks.open(composerOwner, sessionKey)
@@ -1084,6 +1130,7 @@ internal fun ChatScreen(
       morphTrigger = actionsTrigger,
       hazeState = chatHazeState,
       backdrop = chatBackdrop,
+      interactionLocked = shareSelectionActive,
     )
   }
   val conversationStatus: @Composable () -> Unit = {
@@ -1180,6 +1227,17 @@ internal fun ChatScreen(
     speechState = messageSpeechState,
     onToggleListen = viewModel::toggleChatMessageSpeech,
     inlineMediaPlaybackBlocked = inlineMediaPlaybackBlocked,
+    shareSelection = shareSelection,
+    onEnterShareSelection = { selected, all ->
+      shareSelection = selected
+      shareSelectionCandidates = all
+    },
+    onToggleShareSelection = { id ->
+      shareSelection =
+        shareSelection?.let { current ->
+          if (id in current) current - id else current + id
+        }
+    },
     resolveInlineWidgetResource = viewModel::resolveInlineWidgetResource,
     loadImageArtifact = viewModel::loadChatImageArtifact,
     loadMediaArtifact = viewModel::loadChatMediaArtifact,
@@ -1199,11 +1257,103 @@ internal fun ChatScreen(
         .background(ClawTheme.colors.canvas),
     hazeState = chatHazeState,
     overlay = {
-      ClawMorphMenuOverlay(
-        state = actionsMenu,
-        onDismissRequest = actionsMenu::dismiss,
-        backdrop = chatBackdrop,
-      )
+      Box(Modifier.fillMaxSize()) {
+        val selectedShareIds = shareSelection.orEmpty().intersect(shareSelectionCandidates)
+        ChatShareSelectionBar(
+          visible = shareSelectionActive,
+          selectedCount = selectedShareIds.size,
+          allSelected =
+            shareSelectionCandidates.isNotEmpty() &&
+              selectedShareIds.size == shareSelectionCandidates.size,
+          onCancel = { clearShareSelection() },
+          onSelectAll = { shareSelection = shareSelectionCandidates },
+          onConfirm = {
+            // Confirm only stages the payload; the gateway create runs lazily
+            // when a link action is tapped, so dismissing the card afterwards
+            // never leaves an orphan share behind.
+            if (selectedShareIds.isEmpty()) return@ChatShareSelectionBar
+            val shareText =
+              messages
+                .filter { it.entryId in selectedShareIds }
+                .mapNotNull { message ->
+                  chatMessagePlainText(message.content.filter { it.toolActivity == null })
+                    .takeIf(String::isNotBlank)
+                }
+                .joinToString("\n\n")
+            if (shareText.isBlank()) return@ChatShareSelectionBar
+            sharePanelPayload =
+              ChatSharePanelPayload(
+                sessionKey = sessionKey,
+                messageIds = selectedShareIds.toList(),
+                title = activeSessionTitle,
+                text = shareText,
+              )
+            clearShareSelection()
+          },
+          backdrop = chatBackdrop,
+          modifier =
+            Modifier
+              .align(Alignment.BottomCenter)
+              .padding(bottom = 10.dp + minimumChatInputHeight()),
+        )
+        if (sharePanelPayload != null) {
+          // The card is modal: nothing behind it scrolls or reacts, a tap on
+          // blank space (or back) just dismisses it.
+          Box(Modifier.matchParentSize().chatShareBlankDismiss { sharePanelPayload = null })
+        }
+        ChatSharePanel(
+          visible = sharePanelPayload != null,
+          linkLoading = shareLinkBusy == ChatShareLinkAction.CopyLink,
+          wechatLoading = shareLinkBusy == ChatShareLinkAction.WeChat,
+          onCopyLink = {
+            val payload = sharePanelPayload
+            if (payload != null && shareLinkBusy == null) {
+              shareLinkBusy = ChatShareLinkAction.CopyLink
+              scope.launch {
+                val outcome = viewModel.createChatShare(payload.sessionKey, payload.messageIds)
+                if (outcome is SessionShareOutcome.Success) {
+                  sharePanelPayload = null
+                  copyChatText(context, outcome.result.url, nativeString("链接已复制"))
+                } else if (outcome is SessionShareOutcome.Failure) {
+                  Toast.makeText(context, sessionShareFailureText(outcome.failure), Toast.LENGTH_LONG).show()
+                }
+                shareLinkBusy = null
+              }
+            }
+          },
+          onShareWeChat = {
+            val payload = sharePanelPayload
+            if (payload != null && shareLinkBusy == null) {
+              shareLinkBusy = ChatShareLinkAction.WeChat
+              scope.launch {
+                val outcome = viewModel.createChatShare(payload.sessionKey, payload.messageIds)
+                if (outcome is SessionShareOutcome.Success) {
+                  sharePanelPayload = null
+                  shareChatLinkToWeChat(context, outcome.result.url)
+                } else if (outcome is SessionShareOutcome.Failure) {
+                  Toast.makeText(context, sessionShareFailureText(outcome.failure), Toast.LENGTH_LONG).show()
+                }
+                shareLinkBusy = null
+              }
+            }
+          },
+          onCopyText = {
+            val payload = sharePanelPayload
+            sharePanelPayload = null
+            if (payload != null) copyChatText(context, payload.text)
+          },
+          backdrop = chatBackdrop,
+          modifier =
+            Modifier
+              .align(Alignment.BottomCenter)
+              .padding(bottom = 10.dp + minimumChatInputHeight()),
+        )
+        ClawMorphMenuOverlay(
+          state = actionsMenu,
+          onDismissRequest = actionsMenu::dismiss,
+          backdrop = chatBackdrop,
+        )
+      }
     },
     tabletopPanes = tabletopPanes,
     features = features,
@@ -1419,6 +1569,7 @@ internal fun ChatScreen(
         sendCheckpointFull = result == ChatComposerSendStartResult.CheckpointFull
       },
       hazeState = chatHazeState,
+      interactionLocked = shareSelectionActive,
     )
   }
 
@@ -1640,6 +1791,8 @@ private fun ChatHeader(
    * the header outside a chat pane.
    */
   morphTrigger: ClawMorphTrigger? = null,
+  /** Swallows taps on the sidebar target and the actions capsule while sharing. */
+  interactionLocked: Boolean = false,
 ) {
   val statusLabel =
     when {
@@ -1790,17 +1943,23 @@ private fun ChatHeader(
       verticalAlignment = Alignment.CenterVertically,
     ) {
       ClawCapsuleIconButton(
-        leftIcon = LucideSquarePenIcon,
+        leftIcon = MiuixIcons.Medium.MiuixEdit,
         leftContentDescription = nativeString("New chat"),
         onLeftClick = onNewChat,
         leftEnabled = newChatEnabled,
-        rightIcon = LucideEllipsisIcon,
+        rightIcon = MiuixIcons.Medium.MiuixMore,
         rightContentDescription = nativeString("Chat actions"),
         onRightClick = { onActionsMenuExpandedChange(!actionsMenuExpanded) },
         hazeState = hazeState,
         backdrop = backdrop,
         modifier = morphTrigger?.modifier ?: Modifier,
       )
+    }
+    if (interactionLocked) {
+      // Drawn last so it sits above both header targets. Kept transparent: the
+      // picker's checkboxes and capsule are the visible mode change, and dimming
+      // the bar would invent a second "disabled" surface.
+      Box(Modifier.matchParentSize().chatShareTouchShield(true))
     }
   }
 }
@@ -1871,6 +2030,10 @@ private fun ChatMessageList(
   sessionActionsEnabled: Boolean,
   onRewindMessage: (String) -> Unit,
   onForkMessage: (String) -> Unit,
+  /** Checked message ids while the batch share picker is open; null while browsing. */
+  shareSelection: Set<String>? = null,
+  onEnterShareSelection: (selected: Set<String>, all: Set<String>) -> Unit = { _, _ -> },
+  onToggleShareSelection: (String) -> Unit = {},
   speechState: MessageSpeechState?,
   onToggleListen: (String, String) -> Unit,
   inlineMediaPlaybackBlocked: Boolean,
@@ -1921,6 +2084,7 @@ private fun ChatMessageList(
         questions = questions,
       )
     }
+  val context = LocalContext.current
   val indicatorVisible = activeRunCount > 0
   val workingRunTracker = remember(sessionKey) { ChatWorkingRunTracker(sessionKey) }
   val workingRun =
@@ -1994,6 +2158,15 @@ private fun ChatMessageList(
   DisposableEffect(sessionKey, turnRecapResolver) {
     onDispose { turnRecapResolver.abandonActiveWatch(sessionKey) }
   }
+  val shareSelectionActive = shareSelection != null
+  val shareableMessageIds =
+    remember(timeline.items) { chatShareableMessages(timeline.items).mapNotNull { it.entryId }.toSet() }
+  // Prune ids the timeline no longer carries (compaction, branch switch) before
+  // they reach the confirm payload.
+  val selectedShareIds =
+    remember(shareSelection, shareableMessageIds) {
+      shareSelection?.intersect(shareableMessageIds).orEmpty()
+    }
 
   val density = LocalDensity.current
   val headerTextHeight = minimumChatLineHeight(chatProjectStyle()) + minimumChatLineHeight(chatTitleStyle())
@@ -2070,7 +2243,19 @@ private fun ChatMessageList(
                 val revealKey = chatTimelineItemKey(item)
                 // Consumed once per key: recycling the row later must not replay it.
                 val animateReveal = remember(revealKey, revealKeys) { revealTracker.consume(revealKey) }
-                Column(modifier = Modifier.padding(top = spacingAbove)) {
+                // Process rows are siblings of the message bubble, not its
+                // children: without the same share-picker inset a thinking or
+                // tool chain would stay behind while its answer glides right.
+                val shiftsWithSharePicker =
+                  item is ChatTimelineItem.Thinking ||
+                    item is ChatTimelineItem.PendingTools ||
+                    item is ChatTimelineItem.CompletedTools ||
+                    item is ChatTimelineItem.SubagentActivity ||
+                    item is ChatTimelineItem.CollapsedSteps ||
+                    item is ChatTimelineItem.StreamingAssistant
+                val shareRowInset =
+                  rememberChatShareStartInset(shareSelectionActive, shiftsWithSharePicker)
+                Column(modifier = Modifier.padding(top = spacingAbove).offset(x = shareRowInset)) {
                 ChatReaderItem(revealKey) {
                   when (item) {
                     is ChatTimelineItem.Message -> {
@@ -2082,31 +2267,69 @@ private fun ChatMessageList(
                       val typingAnswer =
                         isLatestAssistant &&
                           (chatAnswerIsFresh(item.message.timestampMs) || answerArrivedLive)
-                      ChatBubble(
-                        typewriter = answerTypewriter.takeIf { isLatestAssistant },
-                        typewriterAnimate = typingAnswer,
-                        messageId = item.message.id,
-                        entryId = item.message.entryId,
-                        role = item.message.role,
-                        live = false,
-                        content = visibleContent(item.message).filter { it.toolActivity == null },
-                        timestampMs = item.message.timestampMs.takeIf { item.showTimestamp },
-                        workDurationMs = item.workDurationMs,
-                        onReplyMessage = onReplyMessage,
-                        sessionActionsEnabled = sessionActionsEnabled,
-                        onRewindMessage = onRewindMessage,
-                        onForkMessage = onForkMessage,
-                        speechState = speechState,
-                        onToggleListen = onToggleListen,
-                        inlineMediaPlaybackBlocked = inlineMediaPlaybackBlocked,
-                        inlineWidgetResolverReady = healthOk,
-                        resolveInlineWidgetResource = resolveInlineWidgetResource,
-                        loadImageArtifact = loadImageArtifact,
-                        loadMediaArtifact = loadMediaArtifact,
-                        senderLabel = item.message.senderLabel,
-                        disclosure = { disclosure(item.message) },
-                        onShowThinking = onShowThinkingDetail,
-                      )
+                      // Selection keys are server-side transcript ids (entryId):
+                      // the create endpoint has never heard of the client-local
+                      // ChatMessage.id, and rows without an entryId cannot be shared.
+                      val shareEntryId = chatShareableEntryId(item)
+                      // Only agent bubbles travel right; a user bubble is already
+                      // clear of the checkbox rail on the left.
+                      val agentRow = item.message.role.trim().equals("assistant", ignoreCase = true)
+                      // Never hand the long-press menu a null share action: its
+                      // fallback is the legacy direct text share. Rows restored
+                      // from the transcript cache carry no entryId until the
+                      // live history refresh lands, so a tap in that window
+                      // explains the wait instead of silently switching flows.
+                      val shareSeed: () -> Unit = {
+                        val id = chatShareableEntryId(item)
+                        if (id == null) {
+                          Toast.makeText(context, "会话还在同步，请稍后再分享", Toast.LENGTH_SHORT).show()
+                        } else {
+                          // Freeze following before the picker opens: a new
+                          // stream delta must not yank the list while the user
+                          // is choosing older rows.
+                          readerScroll.navigation.pause()
+                          onEnterShareSelection(
+                            chatShareSelectionSeed(timeline.items, id),
+                            shareableMessageIds,
+                          )
+                        }
+                      }
+                      ChatShareSelectionRow(
+                        selectable = shareEntryId != null,
+                        shiftContent = shareEntryId != null && agentRow,
+                        selectionActive = shareSelectionActive,
+                        selected = shareEntryId != null && shareEntryId in selectedShareIds,
+                        onToggle = { shareEntryId?.let(onToggleShareSelection) },
+                        testTag = "chat-share-select:${item.message.id}",
+                      ) {
+                        ChatBubble(
+                          typewriter = answerTypewriter.takeIf { isLatestAssistant },
+                          typewriterAnimate = typingAnswer,
+                          messageId = item.message.id,
+                          entryId = item.message.entryId,
+                          role = item.message.role,
+                          live = false,
+                          content = visibleContent(item.message).filter { it.toolActivity == null },
+                          timestampMs = item.message.timestampMs.takeIf { item.showTimestamp },
+                          workDurationMs = item.workDurationMs,
+                          onReplyMessage = onReplyMessage,
+                          sessionActionsEnabled = sessionActionsEnabled,
+                          onRewindMessage = onRewindMessage,
+                          onForkMessage = onForkMessage,
+                          onShare = shareSeed,
+                          selectionActive = shareSelectionActive,
+                          speechState = speechState,
+                          onToggleListen = onToggleListen,
+                          inlineMediaPlaybackBlocked = inlineMediaPlaybackBlocked,
+                          inlineWidgetResolverReady = healthOk,
+                          resolveInlineWidgetResource = resolveInlineWidgetResource,
+                          loadImageArtifact = loadImageArtifact,
+                          loadMediaArtifact = loadMediaArtifact,
+                          senderLabel = item.message.senderLabel,
+                          disclosure = { disclosure(item.message) },
+                          onShowThinking = onShowThinkingDetail,
+                        )
+                      }
                     }
 
                     is ChatTimelineItem.OutboxCommand -> {
@@ -2256,8 +2479,9 @@ private fun ChatMessageList(
             }
             // Floating "back to latest" pill: it hides while the list is moving so it
             // never rides along under the finger, and returns once the scroll settles.
+            // The share picker owns the same bottom slot, so it retires it entirely.
             ClawJumpToLatestButton(
-              visible = readerScroll.showJumpToLatest && !readerScroll.scrolling,
+              visible = readerScroll.showJumpToLatest && !readerScroll.scrolling && !shareSelectionActive,
               onClick = readerScroll.jumpToLatest,
               modifier =
                 Modifier
@@ -2477,6 +2701,10 @@ internal fun ChatBubble(
   sessionActionsEnabled: Boolean,
   onRewindMessage: (String) -> Unit,
   onForkMessage: (String) -> Unit,
+  /** Null keeps the legacy direct chooser; the full transcript supplies the batch entry. */
+  onShare: (() -> Unit)? = null,
+  /** True while the batch picker is open: the long-press menu must stay shut. */
+  selectionActive: Boolean = false,
   speechState: MessageSpeechState?,
   onToggleListen: (String, String) -> Unit,
   inlineMediaPlaybackBlocked: Boolean,
@@ -2573,7 +2801,8 @@ internal fun ChatBubble(
         showSessionActions = isUser && entryId != null && sessionActionsEnabled,
         onRewind = entryId?.let { value -> { onRewindMessage(value) } },
         onFork = entryId?.let { value -> { onForkMessage(value) } },
-        enabled = !live,
+        onShare = onShare,
+        enabled = !live && !selectionActive,
         listenActive = messageSpeech?.isActive == true,
         onToggleListen = toggleListen,
       ) {
@@ -2938,9 +3167,7 @@ private fun CollapsedStepsBlock(
           verticalAlignment = Alignment.CenterVertically,
         ) {
           LucideStepsIcon(
-            // Drifts while the chain is folded shut, holds still once opened.
-            running = !expanded,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(20.dp),
             tint = colors.textMuted,
           )
           Text(
@@ -3097,8 +3324,7 @@ private fun CompletedToolActivity(
         verticalAlignment = Alignment.CenterVertically,
       ) {
         LucideStepsIcon(
-          running = !expanded,
-          modifier = Modifier.size(16.dp),
+          modifier = Modifier.size(20.dp),
           tint = ClawTheme.colors.textMuted,
         )
         Text(
@@ -3221,7 +3447,7 @@ private fun CompletedToolActivityItem(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
       ) {
-        LucideToolIcon(kind = kind, tint = ClawTheme.colors.textMuted, size = 16.dp)
+        LucideToolIcon(kind = kind, tint = ClawTheme.colors.textMuted, size = 20.dp)
         Row(
           modifier = Modifier.weight(1f),
           horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -3816,6 +4042,8 @@ private fun ChatComposer(
   onSend: () -> Unit,
   /** Backdrop the attachment menu blurs; the chat screen marks itself as the source. */
   hazeState: HazeState? = null,
+  /** Swallows every touch on the composer while the share picker owns the screen. */
+  interactionLocked: Boolean = false,
 ) {
   val slashCommands =
     remember(value, commands) {
@@ -4020,6 +4248,12 @@ private fun ChatComposer(
           }
         }
       }
+    }
+    if (interactionLocked) {
+      // A sibling above the composer: a guard on the composer's own modifier
+      // would let the focused text field and its buttons see the down event
+      // first on the main pass.
+      Box(Modifier.matchParentSize().chatShareTouchShield(true))
     }
   }
 }
@@ -4984,7 +5218,7 @@ private fun ChatInputPill(
     )
     ClawGlassMenuItem(
       label = nativeString("More info"),
-      icon = LucideEllipsisIcon,
+      icon = MiuixIcons.Medium.MiuixMore,
       onClick = {
         dismissKeyboardForPicker()
         onOpenModelPicker()
@@ -5092,7 +5326,7 @@ private fun ChatInputPill(
       ) {
         if (onOpenDetails != null) {
           IconButton(onClick = onOpenDetails, modifier = Modifier.size(ClawTheme.spacing.touchTarget)) {
-            Icon(Icons.Default.MoreVert, contentDescription = nativeString("Details"))
+            Icon(MiuixIcons.Medium.MiuixMore, contentDescription = nativeString("Details"))
           }
         }
         Box {
@@ -5112,7 +5346,7 @@ private fun ChatInputPill(
             contentColor = ClawTheme.colors.textMuted,
           ) {
             Box(contentAlignment = Alignment.Center) {
-              Icon(imageVector = Icons.Default.Add, contentDescription = nativeString("Add attachment"), modifier = Modifier.size(20.dp))
+              Icon(imageVector = MiuixIcons.Medium.MiuixAdd, contentDescription = nativeString("Add attachment"), modifier = Modifier.size(20.dp))
             }
           }
         }

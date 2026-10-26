@@ -128,6 +128,8 @@ class SecurePrefs(
     private const val chatModelFavoritesKey = "chat.modelFavorites"
     private const val chatModelRecentsKey = "chat.modelRecents"
     private const val sessionCustomGroupsKey = "sessions.customGroups"
+    private const val sessionPinnedKeysPrefix = "sessions.pinned."
+    private const val gatewayProfileCachePrefix = "gateway.profile."
     private const val sidebarPageOrderKey = "sidebar.pageOrder"
     private const val sidebarVisiblePagesKey = "sidebar.visiblePages"
 
@@ -1242,6 +1244,53 @@ class SecurePrefs(
     val sanitized = groups.map(String::trim).filter { it.isNotEmpty() }.distinct()
     persistChatModelRefs(sessionCustomGroupsKey, sanitized)
     _sessionCustomGroups.value = sanitized
+  }
+
+  // Cold-start ordering hint: transcript cache rows do not carry pin metadata, so the
+  // last authoritative pin set is kept here until the first live sessions.list lands.
+  fun cachedPinnedSessionKeys(
+    gatewayId: String,
+    agentId: String,
+  ): Set<String> {
+    val key = sessionPinnedKeysPrefKey(gatewayId, agentId) ?: return emptySet()
+    return plainPrefs.getStringSet(key, emptySet()).orEmpty().toSet()
+  }
+
+  fun storePinnedSessionKeys(
+    gatewayId: String,
+    agentId: String,
+    sessionKeys: Set<String>,
+  ) {
+    val key = sessionPinnedKeysPrefKey(gatewayId, agentId) ?: return
+    val sanitized = sessionKeys.map(String::trim).filter(String::isNotEmpty).toSet()
+    plainPrefs.edit {
+      if (sanitized.isEmpty()) remove(key) else putStringSet(key, sanitized)
+    }
+  }
+
+  private fun sessionPinnedKeysPrefKey(
+    gatewayId: String,
+    agentId: String,
+  ): String? {
+    val gateway = gatewayId.trim().takeIf(String::isNotEmpty) ?: return null
+    val agent = agentId.trim().takeIf(String::isNotEmpty) ?: return null
+    return "$sessionPinnedKeysPrefix$gateway.$agent"
+  }
+
+  internal fun loadCachedGatewayProfile(gatewayId: String): CachedGatewayProfile? {
+    val key = gatewayProfileCacheKey(gatewayId) ?: return null
+    val raw = plainPrefs.getString(key, null)?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    return runCatching { json.decodeFromString<CachedGatewayProfile>(raw) }.getOrNull()
+  }
+
+  internal fun saveCachedGatewayProfile(profile: CachedGatewayProfile) {
+    val key = gatewayProfileCacheKey(profile.gatewayId) ?: return
+    plainPrefs.edit { putString(key, json.encodeToString(profile)) }
+  }
+
+  private fun gatewayProfileCacheKey(gatewayId: String): String? {
+    val gateway = gatewayId.trim().takeIf(String::isNotEmpty) ?: return null
+    return "$gatewayProfileCachePrefix$gateway"
   }
 
   fun setSidebarPageOrder(pageIds: List<String>) {

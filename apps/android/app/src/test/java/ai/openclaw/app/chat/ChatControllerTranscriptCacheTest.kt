@@ -27,6 +27,8 @@ class ChatControllerTranscriptCacheTest {
     currentDefaultAgentRevision: () -> Long = { 0L },
     onSessionDeleted: (ChatSessionDeletion) -> Unit = {},
     onOfflineDefaultAgentRestored: (String) -> Unit = {},
+    loadCachedPinnedSessionKeys: (gatewayId: String, agentId: String) -> Set<String> = { _, _ -> emptySet() },
+    storeCachedPinnedSessionKeys: (gatewayId: String, agentId: String, keys: Set<String>) -> Unit = { _, _, _ -> },
     requestGateway: suspend (method: String, paramsJson: String?) -> String,
   ): ChatController =
     createChatController(
@@ -36,6 +38,8 @@ class ChatControllerTranscriptCacheTest {
       currentDefaultAgentRevision = currentDefaultAgentRevision,
       onSessionDeleted = onSessionDeleted,
       onOfflineDefaultAgentRestored = onOfflineDefaultAgentRestored,
+      loadCachedPinnedSessionKeys = loadCachedPinnedSessionKeys,
+      storeCachedPinnedSessionKeys = storeCachedPinnedSessionKeys,
       requestGateway = requestGateway,
     )
 
@@ -135,6 +139,19 @@ class ChatControllerTranscriptCacheTest {
       savedTranscripts.removeAll { it.gatewayId == gatewayId }
       savedSessions.removeAll { it.gatewayId == gatewayId }
     }
+
+    override suspend fun loadImage(
+      gatewayId: String,
+      source: String,
+    ): CachedImage? = null
+
+    override suspend fun saveImage(
+      gatewayId: String,
+      source: String,
+      image: CachedImage,
+    ) = Unit
+
+    override suspend fun clearImages() = Unit
   }
 
   private fun cachedMessage(
@@ -1130,6 +1147,65 @@ class ChatControllerTranscriptCacheTest {
       assertEquals(true, session.unread)
       assertEquals("green", session.color)
       assertEquals(30L, session.lastActivityAt)
+    }
+
+  @Test
+  fun cachedSessionPrimeAppliesLastPinnedKeysBeforeLiveListArrives() =
+    runTest {
+      val cache =
+        FakeTranscriptCache().apply {
+          sessions =
+            listOf(
+              ChatSessionEntry(key = "fresh", updatedAtMs = 30, displayName = "Fresh"),
+              ChatSessionEntry(key = "pinned", updatedAtMs = 10, displayName = "Pinned"),
+            )
+        }
+      val historyGate = CompletableDeferred<Unit>()
+      val controller =
+        createCachedController(
+          cache = cache,
+          loadCachedPinnedSessionKeys = { _, _ -> setOf("pinned") },
+        ) { method, _ ->
+          if (method == "chat.history") {
+            historyGate.await()
+            """{"sessionId":"session-main","messages":[]}"""
+          } else {
+            emptyChatGatewayResponse(method)
+          }
+        }
+
+      controller.load("main")
+      runCurrent()
+
+      val rows = controller.sessions.value.associateBy(ChatSessionEntry::key)
+      assertEquals(true, rows.getValue("pinned").pinned)
+      assertEquals(false, rows.getValue("fresh").pinned)
+      historyGate.complete(Unit)
+      advanceUntilIdle()
+    }
+
+  @Test
+  fun liveSessionListRefreshesCachedPinnedKeys() =
+    runTest {
+      val savedPinnedKeys = mutableListOf<Triple<String, String, Set<String>>>()
+      val controller =
+        createCachedController(
+          cache = FakeTranscriptCache(),
+          storeCachedPinnedSessionKeys = { gatewayId, agentId, keys ->
+            savedPinnedKeys += Triple(gatewayId, agentId, keys)
+          },
+        ) { method, _ ->
+          if (method == "sessions.list") {
+            """{"sessions":[{"key":"a","pinned":true},{"key":"b"}]}"""
+          } else {
+            emptyChatGatewayResponse(method)
+          }
+        }
+
+      controller.refreshSessions()
+      advanceUntilIdle()
+
+      assertEquals(listOf(Triple("gateway-a", "main", setOf("a"))), savedPinnedKeys)
     }
 
   @Test

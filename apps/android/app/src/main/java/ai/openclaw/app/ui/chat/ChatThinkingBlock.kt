@@ -99,20 +99,16 @@ internal fun ChatThinkingBlock(
           verticalAlignment = Alignment.CenterVertically,
         ) {
           LucideThinkingIcon(
-            // Orbits only while reasoning is still arriving; a finished block
-            // keeps the same glyph at rest, so the row does not change shape.
-            running = streaming,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(20.dp),
             // Same muted ink as the tool rows: the thinking -> tool chain reads
             // as one list, so one colored glyph would break the line up.
             tint = colors.textMuted,
           )
-          Text(
+          ShimmeringLabel(
             text = if (streaming) "思考中…" else "思考完成",
             style = ClawTheme.type.caption,
             color = colors.textMuted,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+            shimmering = streaming,
             modifier = Modifier.weight(1f, fill = false),
           )
           Icon(

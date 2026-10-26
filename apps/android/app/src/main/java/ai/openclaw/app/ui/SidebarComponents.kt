@@ -1,6 +1,5 @@
 package ai.openclaw.app.ui
 
-import ai.openclaw.app.R
 import ai.openclaw.app.chat.ChatSessionEntry
 import ai.openclaw.app.chat.isSessionRunActive
 import ai.openclaw.app.i18n.nativeString
@@ -25,7 +24,6 @@ import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -38,14 +36,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.HourglassEmpty
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -78,8 +68,8 @@ import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
@@ -88,9 +78,21 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Alarm as MiuixAlarm
+import top.yukonga.miuix.kmp.icon.extended.ChevronForward as MiuixChevronForward
+import top.yukonga.miuix.kmp.icon.extended.Close as MiuixClose
+import top.yukonga.miuix.kmp.icon.extended.ContactsCircle as MiuixContactsCircle
+import top.yukonga.miuix.kmp.icon.extended.Messages as MiuixMessages
+import top.yukonga.miuix.kmp.icon.extended.Ok as MiuixOk
+import top.yukonga.miuix.kmp.icon.extended.Pin as MiuixPin
+import top.yukonga.miuix.kmp.icon.extended.Report as MiuixReport
+import top.yukonga.miuix.kmp.icon.extended.Search as MiuixSearch
+import top.yukonga.miuix.kmp.icon.extended.Timer as MiuixTimer
 import kotlinx.coroutines.CancellationException
 import kotlin.math.abs
 
@@ -112,7 +114,7 @@ internal fun SidebarSearchField(
     label = { Text(sidebarSearchLabel()) },
     leadingIcon = {
       Icon(
-        imageVector = Icons.Default.Search,
+        imageVector = MiuixIcons.Medium.MiuixSearch,
         contentDescription = null,
       )
     },
@@ -120,7 +122,7 @@ internal fun SidebarSearchField(
       if (query.isNotEmpty()) {
         IconButton(onClick = { onQueryChange("") }, modifier = Modifier.size(48.dp)) {
           Icon(
-            imageVector = Icons.Default.Close,
+            imageVector = MiuixIcons.Medium.MiuixClose,
             contentDescription = nativeString("Clear session search"),
           )
         }
@@ -144,6 +146,43 @@ internal fun SidebarSearchField(
       ),
   )
 }
+
+@Composable
+internal fun SidebarChevron(
+  expanded: Boolean,
+  palette: SidebarPalette,
+  modifier: Modifier = Modifier,
+) {
+  // One right-pointing chevron, rotated down when expanded. Miuix's ExpandMore
+  // glyph reads as a maximize control, so it is deliberately not used here.
+  val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+  Icon(
+    imageVector = MiuixIcons.Medium.MiuixChevronForward,
+    contentDescription = null,
+    tint = palette.muted,
+    modifier =
+      modifier.size(18.dp).graphicsLayer {
+        rotationZ =
+          when {
+            expanded -> 90f
+            rtl -> 180f
+            else -> 0f
+          }
+      },
+  )
+}
+
+/**
+ * Recent rows no longer carry a source subtitle, so the origin is shown as a
+ * leading glyph: person for app-created (user) threads, clock for cron, and a
+ * chat bubble for inbound channels.
+ */
+internal fun sidebarSessionOriginIcon(sessionKey: String): ImageVector =
+  when (sessionSourceKey(sessionKey)) {
+    null -> MiuixIcons.Medium.MiuixContactsCircle
+    "cron" -> MiuixIcons.Medium.MiuixAlarm
+    else -> MiuixIcons.Medium.MiuixMessages
+  }
 
 @Composable
 internal fun SidebarSectionTitle(
@@ -209,17 +248,7 @@ internal fun SidebarCollapsibleHeader(
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(8.dp),
   ) {
-    Icon(
-      imageVector =
-        if (expanded) {
-          Icons.Default.KeyboardArrowDown
-        } else {
-          Icons.AutoMirrored.Filled.KeyboardArrowRight
-        },
-      contentDescription = null,
-      tint = palette.muted,
-      modifier = Modifier.size(18.dp),
-    )
+    SidebarChevron(expanded = expanded, palette = palette)
     iconContent?.invoke()
     icon?.let {
       Icon(
@@ -255,6 +284,7 @@ internal fun SidebarActionRow(
   icon: ImageVector,
   palette: SidebarPalette,
   onClick: () -> Unit,
+  iconRotationZ: Float = 0f,
 ) {
   SidebarRowSurface(selected = null, palette = palette, onClick = onClick) {
     Spacer(modifier = Modifier.size(28.dp))
@@ -265,7 +295,12 @@ internal fun SidebarActionRow(
       modifier = Modifier.weight(1f),
       maxLines = 1,
     )
-    Icon(imageVector = icon, contentDescription = null, tint = palette.muted, modifier = Modifier.size(18.dp))
+    Icon(
+      imageVector = icon,
+      contentDescription = null,
+      tint = palette.muted,
+      modifier = Modifier.size(18.dp).graphicsLayer { rotationZ = iconRotationZ },
+    )
   }
 }
 
@@ -369,7 +404,7 @@ internal fun SidebarNavigationRow(
       )
       if (pinned == true) {
         Icon(
-          painter = painterResource(R.drawable.ic_web_check),
+          imageVector = MiuixIcons.Medium.MiuixOk,
           contentDescription = nativeString("Pinned"),
           tint = palette.text,
           modifier = Modifier.size(18.dp),
@@ -427,7 +462,7 @@ internal fun SidebarSessionActivityIndicator(
   when (activity) {
     SidebarSessionActivity.Queued -> {
       Icon(
-        imageVector = Icons.Default.HourglassEmpty,
+        imageVector = MiuixIcons.Medium.MiuixTimer,
         contentDescription = nativeString("Queued"),
         modifier = Modifier.size(15.dp),
         tint = palette.muted,
@@ -455,7 +490,7 @@ internal fun SidebarSessionActivityIndicator(
 
     SidebarSessionActivity.Failed -> {
       Icon(
-        imageVector = Icons.Default.ErrorOutline,
+        imageVector = MiuixIcons.Medium.MiuixReport,
         contentDescription = nativeString("Run failed"),
         modifier = Modifier.size(16.dp),
         tint = ClawTheme.colors.danger,
@@ -495,30 +530,28 @@ internal fun SidebarSessionRow(
     onClick = onClick,
     menuContent = menuContent,
   ) {
-    Column(modifier = Modifier.weight(1f)) {
-      Text(
-        text = sidebarSessionTitle(session),
-        style = ClawTheme.type.body.copy(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
-        color = palette.text,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-      )
-      Text(
-        text = sidebarSessionSubtitle(session, sessionStateDescription),
-        style = ClawTheme.type.caption.copy(fontSize = 12.sp, lineHeight = 16.sp),
-        color = palette.muted,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-      )
-    }
+    Icon(
+      imageVector = sidebarSessionOriginIcon(session.key),
+      contentDescription = null,
+      tint = palette.muted,
+      modifier = Modifier.size(22.dp),
+    )
+    Text(
+      text = sidebarSessionTitle(session),
+      style = ClawTheme.type.body.copy(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium),
+      color = palette.text,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+      modifier = Modifier.weight(1f),
+    )
     activity?.let {
       SidebarSessionActivityIndicator(activity = it, palette = palette)
     }
     if (session.pinned == true) {
       Icon(
-        imageVector = Icons.Default.PushPin,
+        imageVector = MiuixIcons.Medium.MiuixPin,
         contentDescription = nativeString("Pinned"),
-        modifier = Modifier.size(13.dp),
+        modifier = Modifier.size(16.dp),
         tint = palette.muted,
       )
     }
@@ -651,15 +684,3 @@ private suspend fun PointerInputScope.detectSidebarRowDrag(
     }
   }
 }
-
-internal fun sidebarSessionSubtitle(
-  session: ChatSessionEntry,
-  activeRunLabel: String?,
-  nowMs: Long = System.currentTimeMillis(),
-): String =
-  sessionListSubtitle(
-    session = session,
-    fallback = sessionSourceLabel(session.key),
-    nowMs = nowMs,
-    activeRunLabel = activeRunLabel,
-  )

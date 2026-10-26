@@ -150,7 +150,7 @@ class SidebarShellLogicTest {
             session("pinned", activity = 1, pinned = true),
             session("archived", activity = 100, archived = true),
           ) +
-            (1L..10L).map { activity ->
+            (1L..14L).map { activity ->
               session(
                 key = "session-$activity",
                 activity = activity,
@@ -163,10 +163,10 @@ class SidebarShellLogicTest {
 
     val recentKeys = presentation.recentSections.flatMap { it.entries }.map(ChatSessionEntry::key)
     // Pins are no longer a separate section: they sort to the top of the same
-    // eight-row window instead of being pulled out of it.
-    assertEquals(8, recentKeys.size)
+    // twelve-row window instead of being pulled out of it.
+    assertEquals(12, recentKeys.size)
     assertEquals(
-      setOf("pinned", "session-10", "session-9", "session-8", "session-7", "session-6", "session-5", "session-4"),
+      setOf("pinned", "session-14", "session-13", "session-12", "session-11", "session-10", "session-9", "session-8", "session-7", "session-6", "session-5", "session-4"),
       recentKeys.toSet(),
     )
     assertEquals(listOf("Work", "Ungrouped"), presentation.recentSections.map { it.title })
@@ -182,13 +182,13 @@ class SidebarShellLogicTest {
 
   @Test
   fun expandedSessionPresentationRevealsAllRowsAndCollapsesToTheSameResult() {
-    val sessions = (1L..12L).map { activity -> session("session-$activity", activity = activity) }
+    val sessions = (1L..14L).map { activity -> session("session-$activity", activity = activity) }
 
     val collapsed = sidebarSessionPresentation(sessions, knownGroups = emptyList(), expanded = false)
     val expanded = sidebarSessionPresentation(sessions, knownGroups = emptyList(), expanded = true)
 
-    assertEquals(8, collapsed.recentSections.flatMap { it.entries }.size)
-    assertEquals(12, expanded.recentSections.flatMap { it.entries }.size)
+    assertEquals(12, collapsed.recentSections.flatMap { it.entries }.size)
+    assertEquals(14, expanded.recentSections.flatMap { it.entries }.size)
     assertFalse(collapsed.recentSections.flatMap { it.entries }.any { it.key == "session-1" })
     assertTrue(expanded.recentSections.flatMap { it.entries }.any { it.key == "session-1" })
     assertTrue(expanded.canExpandRecent)
@@ -296,25 +296,7 @@ class SidebarShellLogicTest {
   }
 
   @Test
-  fun sessionSubtitleShowsWorkingForActiveRunsAndKeepsTheIdleSourceFallback() {
-    val session = ChatSessionEntry(key = "telegram:123", updatedAtMs = 1_000, hasActiveRun = true)
-
-    assertEquals(
-      "Working",
-      sidebarSessionSubtitle(session, activeRunLabel = "Working", nowMs = 1_000),
-    )
-    assertEquals(
-      "Telegram",
-      sidebarSessionSubtitle(session.copy(hasActiveRun = false), activeRunLabel = null, nowMs = 1_000),
-    )
-    assertEquals(
-      "Working",
-      sidebarSessionSubtitle(session.copy(hasActiveRun = null, status = " RUNNING "), activeRunLabel = "Working", nowMs = 1_000),
-    )
-    assertEquals(
-      "Telegram",
-      sidebarSessionSubtitle(session.copy(hasActiveRun = false, status = "running"), activeRunLabel = "Working", nowMs = 1_000),
-    )
+  fun sessionActivityCoversActiveRunsAndQueuedReservations() {
     assertNull(sidebarSessionActivity("running", lastRunError = null, hasActiveRun = false, unread = false))
     assertNull(sidebarSessionActivity("done", lastRunError = null, hasActiveRun = true, unread = false))
     assertEquals(SidebarSessionActivity.Running, sidebarSessionActivity("done", null, false, false, continuing = true))

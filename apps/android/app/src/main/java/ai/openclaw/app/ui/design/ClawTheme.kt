@@ -2,7 +2,7 @@ package ai.openclaw.app.ui.design
 
 import ai.openclaw.app.AppearanceThemeFamily
 import ai.openclaw.app.R
-import android.os.Build
+import android.content.res.Configuration
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -19,11 +19,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
@@ -32,33 +32,30 @@ import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
 
 /**
- * MiSans VF ships a single variable `wght` axis (150..700, default 330) covering both
- * Latin and CJK in one file, so Chinese no longer falls back to a mismatched system
- * face. Each weight the design system asks for is declared as its own [Font] entry
- * over the same asset, with [FontVariation.Settings] pinning the exact axis value.
+ * MiSans ships as four static instances rather than one variable font.
+ * HyperOS drops `wght` variation settings for bundled fonts, which collapsed
+ * every design weight onto the file's default axis (330). Separate files keep
+ * Normal / Medium / SemiBold / Bold distinct on every OEM.
  *
- * MiSans does NOT follow the usual mapping: its `Bold` named instance sits at 630 and
- * 700 is `Heavy`, so the axis values below are explicit rather than derived from
- * [FontWeight].
+ * The declared weights are shifted by the platform's fontWeightAdjustment so
+ * Compose's own adjustment cancels out: a 400 request becomes 400 + adjustment,
+ * and the matching entry is declared at 400 + adjustment. The drawn face stays
+ * on the designed weight even when the OS applies a global text-weight preference.
  */
-private fun misans(axisWeight: Float, weight: FontWeight) =
-  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-    Font(
-      resId = R.font.misans_vf,
-      weight = weight,
-      variationSettings = FontVariation.Settings(FontVariation.Setting("wght", axisWeight)),
-    )
-  } else {
-    Font(resId = R.font.misans_vf, weight = weight)
-  }
+internal fun clawFontFamilyFor(fontWeightAdjustment: Int): FontFamily {
+  val adjustment =
+    if (fontWeightAdjustment == Configuration.FONT_WEIGHT_ADJUSTMENT_UNDEFINED) 0 else fontWeightAdjustment
 
-internal val clawFontFamily: FontFamily =
-  FontFamily(
-    misans(axisWeight = 400f, weight = FontWeight.Normal),
-    misans(axisWeight = 450f, weight = FontWeight.Medium),
-    misans(axisWeight = 560f, weight = FontWeight.SemiBold),
-    misans(axisWeight = 630f, weight = FontWeight.Bold),
+  fun weight(designWeight: Int): FontWeight = FontWeight((designWeight + adjustment).coerceIn(1, 1000))
+  return FontFamily(
+    Font(R.font.misans_regular, weight = weight(400)),
+    Font(R.font.misans_medium, weight = weight(500)),
+    Font(R.font.misans_semibold, weight = weight(600)),
+    Font(R.font.misans_bold, weight = weight(700)),
   )
+}
+
+internal val clawFontFamily: FontFamily = clawFontFamilyFor(fontWeightAdjustment = 0)
 
 /**
  * App color tokens consumed by ClawTheme and bridged into Material components.
@@ -435,7 +432,9 @@ internal fun ClawDesignTheme(
   content: @Composable () -> Unit,
 ) {
   val colors = clawColorsForTheme(dark = dark, family = family, accentArgb = accentArgb)
-  val typography = clawTypography(clawFontFamily)
+  val fontWeightAdjustment = LocalConfiguration.current.fontWeightAdjustment
+  val fontFamily = remember(fontWeightAdjustment) { clawFontFamilyFor(fontWeightAdjustment) }
+  val typography = clawTypography(fontFamily)
 
   val spacing = ClawSpacing()
 

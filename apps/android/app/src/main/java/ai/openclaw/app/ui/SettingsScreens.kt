@@ -2,9 +2,12 @@ package ai.openclaw.app.ui
 
 import ai.openclaw.app.AndroidLicenseNotice
 import ai.openclaw.app.AppLanguage
+import ai.openclaw.app.AppLogRange
 import ai.openclaw.app.AppearanceThemeFamily
 import ai.openclaw.app.AppearanceThemeMode
 import ai.openclaw.app.BuildConfig
+import ai.openclaw.app.captureAppLogSnapshot
+import ai.openclaw.app.shareAppLogSnapshot
 import ai.openclaw.app.CronEditorDraftState
 import ai.openclaw.app.GatewayAgentSummary
 import ai.openclaw.app.GatewayCronActionState
@@ -15,6 +18,9 @@ import ai.openclaw.app.GatewayCronJobSummary
 import ai.openclaw.app.GatewayCronRunHistoryState
 import ai.openclaw.app.GatewayExecApprovalNotice
 import ai.openclaw.app.GatewayExecApprovalSummary
+import ai.openclaw.app.GatewayProfileRefreshResult
+import ai.openclaw.app.GatewayProfileState
+import ai.openclaw.app.GatewayProfileWriteResult
 import ai.openclaw.app.GatewaySummaryState
 import ai.openclaw.app.GatewayTalkSetupReadiness
 import ai.openclaw.app.GatewayTalkSetupState
@@ -22,6 +28,7 @@ import ai.openclaw.app.GatewayUsageProviderSummary
 import ai.openclaw.app.LocationMode
 import ai.openclaw.app.MainViewModel
 import ai.openclaw.app.NotificationPackageFilterMode
+import ai.openclaw.app.R
 import ai.openclaw.app.SensitiveFeatureConfig
 import ai.openclaw.app.VoiceCaptureMode
 import ai.openclaw.app.appLanguageRowSubtitle
@@ -48,7 +55,10 @@ import ai.openclaw.app.photoReadPermissionsForRequest
 import ai.openclaw.app.reconcileRestoredAction
 import ai.openclaw.app.setAppLanguage
 import ai.openclaw.app.ui.design.ClawAgentAvatar
+import ai.openclaw.app.ui.design.ClawGlassMenuItem
+import ai.openclaw.app.ui.design.ClawGlassTopBarButton
 import ai.openclaw.app.ui.design.ClawIconBadge
+import ai.openclaw.app.ui.design.ClawMorphMenuOverlay
 import ai.openclaw.app.ui.design.ClawListItem
 import ai.openclaw.app.ui.design.ClawListPanel
 import ai.openclaw.app.ui.design.ClawPanel
@@ -63,14 +73,26 @@ import ai.openclaw.app.ui.design.ClawStatusPill
 import ai.openclaw.app.ui.design.ClawTextBadge
 import ai.openclaw.app.ui.design.ClawTextField
 import ai.openclaw.app.ui.design.ClawTheme
+import ai.openclaw.app.ui.design.ClawTopBarButtonTopInset
+import ai.openclaw.app.ui.design.ClawTopBarContentHeight
 import ai.openclaw.app.ui.design.MAX_APP_TEXT_SCALE
 import ai.openclaw.app.ui.design.MIN_APP_TEXT_SCALE
+import ai.openclaw.app.ui.design.MiuixGroup
+import ai.openclaw.app.ui.design.MiuixGroupDivider
+import ai.openclaw.app.ui.design.MiuixGroupLabel
+import ai.openclaw.app.ui.design.MiuixInputRow
+import ai.openclaw.app.ui.design.MiuixTone
+import ai.openclaw.app.ui.design.MiuixValueRow
 import ai.openclaw.app.ui.design.OpenClawMascot
 import ai.openclaw.app.ui.design.ProvideAppTextScale
 import ai.openclaw.app.ui.design.TalkWaveform
 import ai.openclaw.app.ui.design.TalkWaveformPhase
 import ai.openclaw.app.ui.design.agentAvatarSource
 import ai.openclaw.app.ui.design.appTextScaleSteps
+import ai.openclaw.app.ui.design.clawBackdropTopBar
+import ai.openclaw.app.ui.design.rememberClawBackdrop
+import ai.openclaw.app.ui.design.rememberClawMorphMenuState
+import ai.openclaw.app.ui.design.rememberClawMorphTrigger
 import ai.openclaw.app.uppercaseFirstGraphemeOrNull
 import ai.openclaw.app.voice.AudioInputDeviceOption
 import ai.openclaw.app.voice.VoiceWakePreferences
@@ -93,13 +115,26 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -107,11 +142,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -130,6 +168,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
@@ -143,49 +182,108 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Today
+import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.lerp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.util.lerp
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.statusBars
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.kyant.backdrop.Backdrop
+import com.kyant.backdrop.backdrops.layerBackdrop
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import top.yukonga.miuix.kmp.icon.MiuixIcons
 import java.text.DateFormat
 import java.util.Date
 import kotlin.math.roundToInt
+import top.yukonga.miuix.kmp.icon.extended.Edit as MiuixEdit
+import top.yukonga.miuix.kmp.icon.extended.Email as MiuixEmail
+import top.yukonga.miuix.kmp.icon.extended.Ok as MiuixOk
+import top.yukonga.miuix.kmp.icon.extended.Photos as MiuixPhotos
+import top.yukonga.miuix.kmp.icon.extended.Refresh as MiuixRefresh
 
 /**
  * Dispatches a selected settings route to its detail screen without changing navigation ownership.
@@ -205,6 +303,7 @@ internal fun SettingsDetailScreen(
     SettingsRoute.Approvals -> ApprovalsSettingsScreen(viewModel = viewModel, onBack = onBack)
     SettingsRoute.CronJobs -> CronJobsSettingsScreen(viewModel = viewModel, onBack = onBack)
     SettingsRoute.Usage -> UsageSettingsScreen(viewModel = viewModel, onBack = onBack)
+    SettingsRoute.Share -> ShareSettingsScreen(viewModel = viewModel, onBack = onBack)
     SettingsRoute.Skills -> SkillsSettingsScreen(viewModel = viewModel, onBack = onBack)
     SettingsRoute.SkillWorkshop -> SkillWorkshopSettingsScreen(viewModel = viewModel, onBack = onBack)
     SettingsRoute.SystemAgent -> SystemAgentSettingsScreen(viewModel = viewModel, onBack = onBack)
@@ -668,21 +767,495 @@ private fun ApprovalsSettingsScreen(
   }
 }
 
+private fun profileRefreshErrorText(result: GatewayProfileRefreshResult): String =
+  when (result) {
+    GatewayProfileRefreshResult.Success -> ""
+    GatewayProfileRefreshResult.Disconnected -> "网关未连接，请检查连接"
+    GatewayProfileRefreshResult.Unsupported -> "当前网关版本不支持个人资料"
+    GatewayProfileRefreshResult.Forbidden -> "当前连接没有查看个人资料的权限"
+    is GatewayProfileRefreshResult.Failed -> result.message ?: "资料刷新失败，请稍后重试"
+  }
+
+private fun profileWriteErrorText(result: GatewayProfileWriteResult): String =
+  when (result) {
+    GatewayProfileWriteResult.Success -> ""
+    GatewayProfileWriteResult.Disconnected -> "网关未连接，请稍后重试"
+    GatewayProfileWriteResult.Unsupported -> "当前网关版本不支持修改资料"
+    GatewayProfileWriteResult.Forbidden -> "当前连接没有修改资料的权限"
+    is GatewayProfileWriteResult.Failed -> result.message ?: "保存失败，请稍后重试"
+  }
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ProfileSettingsScreen(
   viewModel: MainViewModel,
   onBack: () -> Unit,
 ) {
-  val displayName by viewModel.displayName.collectAsState()
-  var draft by remember(displayName) { mutableStateOf(displayName.ifBlank { "OpenClaw" }) }
+  val profileState by viewModel.gatewayProfile.collectAsState()
+  val isConnected by viewModel.isConnected.collectAsState()
+  val adminAvailable by viewModel.operatorAdminScopeAvailable.collectAsState()
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  val profile = (profileState as? GatewayProfileState.Ready)?.profile
+  var refreshing by remember { mutableStateOf(false) }
+  var uploadingAvatar by remember { mutableStateOf(false) }
+  var notice by remember { mutableStateOf<String?>(null) }
+  var errorText by remember { mutableStateOf<String?>(null) }
+  var showNameSheet by remember { mutableStateOf(false) }
+  var nameSaving by remember { mutableStateOf(false) }
+  var nameError by remember { mutableStateOf<String?>(null) }
+  val canEdit = profile?.canEdit == true || adminAvailable
+  val editingEnabled =
+    profile != null &&
+      isConnected &&
+      canEdit &&
+      !refreshing &&
+      !uploadingAvatar
 
-  SettingsDetailFrame(title = nativeString("Profile"), subtitle = nativeString("How this phone appears to OpenClaw."), icon = Icons.Default.Person, onBack = onBack) {
-    ClawPanel {
-      Column(verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs)) {
-        ClawTextField(value = draft, onValueChange = { draft = it }, placeholder = nativeString("Device name"))
-        ClawPrimaryButton(text = nativeString("Save Profile"), onClick = { viewModel.setDisplayName(draft) }, enabled = draft.isNotBlank())
+  LaunchedEffect(profile?.id) {
+    notice = null
+    errorText = null
+    viewModel.ensureGatewayProfileLoaded()
+  }
+  LaunchedEffect(isConnected) {
+    if (isConnected) viewModel.ensureGatewayProfileLoaded()
+  }
+
+  fun refresh() {
+    if (refreshing || uploadingAvatar) return
+    scope.launch {
+      refreshing = true
+      notice = null
+      errorText = null
+      val result = viewModel.refreshGatewayProfile()
+      if (result == GatewayProfileRefreshResult.Success) {
+        notice = "资料已刷新"
+      } else {
+        errorText = profileRefreshErrorText(result)
+      }
+      refreshing = false
+    }
+  }
+
+  fun submitName(value: String?) {
+    if (nameSaving) return
+    scope.launch {
+      nameSaving = true
+      nameError = null
+      when (val result = viewModel.setGatewayProfileDisplayName(value)) {
+        GatewayProfileWriteResult.Success -> {
+          showNameSheet = false
+          notice = "名字已保存"
+        }
+
+        else -> nameError = profileWriteErrorText(result)
+      }
+      nameSaving = false
+    }
+  }
+
+  val photoPicker =
+    rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+      if (uri == null) return@rememberLauncherForActivityResult
+      scope.launch {
+        uploadingAvatar = true
+        notice = null
+        errorText = null
+        when (val picked = prepareProfileAvatar(context, uri)) {
+          is ProfileAvatarPickResult.Ready -> {
+            when (val result = viewModel.setGatewayProfileAvatar(picked.upload)) {
+              GatewayProfileWriteResult.Success -> notice = "头像已更新"
+              else -> errorText = profileWriteErrorText(result)
+            }
+          }
+
+          ProfileAvatarPickResult.InvalidImage -> {
+            errorText = "无法读取这张照片，请换一张"
+          }
+
+          ProfileAvatarPickResult.TooLarge -> {
+            errorText = "照片太大，请选择较小的图片"
+          }
+        }
+        uploadingAvatar = false
       }
     }
+
+  ClawScaffold(
+    contentPadding = PaddingValues(start = 14.dp, top = 8.dp, end = 14.dp, bottom = 0.dp),
+  ) {
+    Column(
+      modifier =
+        Modifier
+          .fillMaxSize()
+          .verticalScroll(rememberScrollState())
+          .padding(bottom = 24.dp),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        ClawPlainIconButton(
+          icon = Icons.AutoMirrored.Filled.ArrowBack,
+          contentDescription = "返回",
+          onClick = onBack,
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        if (refreshing) {
+          CircularProgressIndicator(
+            modifier = Modifier.size(20.dp),
+            strokeWidth = 2.dp,
+            color = ClawTheme.colors.textMuted,
+          )
+        } else {
+          ClawPlainIconButton(
+            icon = MiuixIcons.Medium.MiuixRefresh,
+            contentDescription = "刷新资料",
+            enabled = !uploadingAvatar,
+            onClick = { refresh() },
+          )
+        }
+      }
+      Text(
+        text = "我的信息",
+        style =
+          ClawTheme.type.display.copy(
+            fontSize = 30.sp,
+            lineHeight = 36.sp,
+            fontWeight = FontWeight.SemiBold,
+          ),
+        color = ClawTheme.colors.text,
+        modifier = Modifier.padding(start = 4.dp, top = 4.dp, bottom = 18.dp),
+      )
+
+      MiuixGroupLabel("基础资料")
+      MiuixGroup {
+        if (profile == null) {
+          when (val state = profileState) {
+            GatewayProfileState.Loading -> {
+              Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+              ) {
+                CircularProgressIndicator(
+                  modifier = Modifier.size(18.dp),
+                  strokeWidth = 2.dp,
+                  color = ClawTheme.colors.textMuted,
+                )
+                Text("正在加载网关资料…", style = ClawTheme.type.body, color = ClawTheme.colors.textMuted)
+              }
+            }
+
+            GatewayProfileState.Disconnected -> {
+              ProfileUnavailableContent(
+                title = "网关未连接",
+                body = "连接网关后可以查看和修改个人资料。",
+                onRetry = { refresh() },
+              )
+            }
+
+            GatewayProfileState.Unsupported -> {
+              ProfileUnavailableContent(
+                title = "当前网关版本不支持个人资料",
+                body = "升级网关后再试。",
+                onRetry = null,
+              )
+            }
+
+            is GatewayProfileState.Failed -> {
+              ProfileUnavailableContent(
+                title = "加载失败",
+                body = state.message ?: "请稍后重试。",
+                onRetry = { refresh() },
+              )
+            }
+
+            is GatewayProfileState.Ready -> Unit
+          }
+        } else {
+          AccountSettingRow(
+            title = "头像",
+            onClick =
+              if (editingEnabled) {
+                {
+                  photoPicker.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                  )
+                }
+              } else {
+                null
+              },
+            showChevron = editingEnabled,
+            trailing = {
+              GatewayProfileAvatar(
+                profile = profile,
+                size = 40.dp,
+                loadAvatar = { viewModel.loadGatewayProfileAvatar() },
+              )
+              Spacer(modifier = Modifier.width(8.dp))
+            },
+          )
+          AccountSettingRow(
+            title = "昵称",
+            value = profile.displayName?.takeIf(String::isNotBlank) ?: "未设置",
+            onClick =
+              if (editingEnabled) {
+                {
+                  nameError = null
+                  showNameSheet = true
+                }
+              } else {
+                null
+              },
+            showChevron = editingEnabled,
+          )
+          AccountSettingRow(
+            title = "关联邮箱",
+            value = profile.emails.joinToString(", ").ifEmpty { "未关联" },
+            showChevron = false,
+          )
+        }
+      }
+
+      if (profile != null) {
+        if (!isConnected) {
+          Text(
+            text = "当前显示的是上次缓存的资料。",
+            style = ClawTheme.type.caption,
+            color = ClawTheme.colors.textMuted,
+            modifier = Modifier.padding(start = 6.dp, top = 10.dp),
+          )
+        } else if (!canEdit) {
+          Text(
+            text = "当前连接没有修改资料的权限。",
+            style = ClawTheme.type.caption,
+            color = ClawTheme.colors.warning,
+            modifier = Modifier.padding(start = 6.dp, top = 10.dp),
+          )
+        }
+        notice?.let { message ->
+          Text(
+            text = message,
+            style = ClawTheme.type.caption,
+            color = ClawTheme.colors.success,
+            modifier = Modifier.padding(start = 6.dp, top = 8.dp),
+          )
+        }
+        errorText?.let { message ->
+          Text(
+            text = message,
+            style = ClawTheme.type.caption,
+            color = ClawTheme.colors.danger,
+            modifier = Modifier.padding(start = 6.dp, top = 8.dp),
+          )
+        }
+      }
+    }
+  }
+
+  if (showNameSheet && profile != null) {
+    ProfileNameSheet(
+      initialName = profile.displayName.orEmpty(),
+      saving = nameSaving,
+      errorText = nameError,
+      onDismiss = {
+        if (!nameSaving) {
+          showNameSheet = false
+          nameError = null
+        }
+      },
+      onSave = { value -> submitName(value) },
+    )
+  }
+}
+
+@Composable
+private fun AccountSettingRow(
+  title: String,
+  modifier: Modifier = Modifier,
+  value: String? = null,
+  onClick: (() -> Unit)? = null,
+  showChevron: Boolean = onClick != null,
+  trailing: (@Composable () -> Unit)? = null,
+) {
+  Row(
+    modifier =
+      modifier
+        .fillMaxWidth()
+        .heightIn(min = 58.dp)
+        .then(
+          if (onClick != null) {
+            Modifier.clickable(role = Role.Button, onClick = onClick)
+          } else {
+            Modifier
+          },
+        ).padding(horizontal = 20.dp, vertical = 14.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Text(
+      text = title,
+      style = ClawTheme.type.body.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium),
+      color = ClawTheme.colors.text,
+      modifier = Modifier.weight(1f),
+    )
+    trailing?.invoke()
+    value?.let {
+      Text(
+        text = it,
+        style = ClawTheme.type.body.copy(fontSize = 15.sp),
+        color = ClawTheme.colors.textMuted,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.padding(start = 8.dp),
+      )
+    }
+    if (showChevron) {
+      Spacer(modifier = Modifier.width(4.dp))
+      Icon(
+        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+        contentDescription = null,
+        modifier = Modifier.size(18.dp),
+        tint = ClawTheme.colors.textSubtle,
+      )
+    }
+  }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ProfileNameSheet(
+  initialName: String,
+  saving: Boolean,
+  errorText: String?,
+  onDismiss: () -> Unit,
+  onSave: (String?) -> Unit,
+) {
+  val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+  var draft by remember(initialName) { mutableStateOf(initialName) }
+  ModalBottomSheet(
+    onDismissRequest = { if (!saving) onDismiss() },
+    sheetState = sheetState,
+    containerColor = ClawTheme.colors.surface,
+    dragHandle = null,
+  ) {
+    Column(
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .padding(horizontal = 20.dp)
+          .padding(top = 24.dp, bottom = 28.dp),
+      horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+      Text(
+        text = "设置名字",
+        style = ClawTheme.type.section.copy(fontSize = 18.sp, fontWeight = FontWeight.Medium),
+        color = ClawTheme.colors.text,
+        modifier = Modifier.padding(bottom = 18.dp),
+      )
+      Box(
+        modifier =
+          Modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(ClawTheme.colors.surfacePressed)
+            .padding(horizontal = 16.dp),
+        contentAlignment = Alignment.CenterStart,
+      ) {
+        if (draft.isEmpty()) {
+          Text(
+            text = "输入名字",
+            style = ClawTheme.type.body.copy(fontSize = 17.sp),
+            color = ClawTheme.colors.textSubtle,
+          )
+        }
+        BasicTextField(
+          value = draft,
+          onValueChange = { value -> if (value.length <= 256) draft = value },
+          singleLine = true,
+          textStyle = ClawTheme.type.body.copy(fontSize = 17.sp, color = ClawTheme.colors.text),
+          cursorBrush = SolidColor(ClawTheme.colors.accent),
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Done),
+          keyboardActions = KeyboardActions(onDone = { if (!saving) onSave(draft.trim().takeIf(String::isNotEmpty)) }),
+          modifier = Modifier.fillMaxWidth(),
+        )
+      }
+      errorText?.let { message ->
+        Text(
+          text = message,
+          style = ClawTheme.type.caption,
+          color = ClawTheme.colors.danger,
+          modifier = Modifier.padding(top = 8.dp),
+        )
+      }
+      Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 18.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+      ) {
+        ProfileSheetButton(
+          text = "取消",
+          onClick = onDismiss,
+          containerColor = ClawTheme.colors.surfacePressed,
+          contentColor = ClawTheme.colors.text,
+          enabled = !saving,
+          modifier = Modifier.weight(1f),
+        )
+        ProfileSheetButton(
+          text = if (saving) "保存中…" else "确定",
+          onClick = { onSave(draft.trim().takeIf(String::isNotEmpty)) },
+          containerColor = ClawTheme.colors.primary,
+          contentColor = ClawTheme.colors.primaryText,
+          enabled = !saving,
+          modifier = Modifier.weight(1f),
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun ProfileSheetButton(
+  text: String,
+  onClick: () -> Unit,
+  containerColor: Color,
+  contentColor: Color,
+  enabled: Boolean,
+  modifier: Modifier = Modifier,
+) {
+  Surface(
+    onClick = onClick,
+    enabled = enabled,
+    modifier = modifier.height(52.dp),
+    shape = RoundedCornerShape(16.dp),
+    color = if (enabled) containerColor else containerColor.copy(alpha = 0.5f),
+    contentColor = contentColor,
+  ) {
+    Box(contentAlignment = Alignment.Center) {
+      Text(
+        text = text,
+        style = ClawTheme.type.body.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium),
+      )
+    }
+  }
+}
+
+@Composable
+private fun ProfileUnavailableContent(
+  title: String,
+  body: String,
+  onRetry: (() -> Unit)?,
+) {
+  Column(
+    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+    verticalArrangement = Arrangement.spacedBy(6.dp),
+  ) {
+    Text(text = title, style = ClawTheme.type.section, color = ClawTheme.colors.text)
+    Text(text = body, style = ClawTheme.type.body, color = ClawTheme.colors.textMuted)
+  }
+  onRetry?.let { retry ->
+    MiuixGroupDivider()
+    AccountSettingRow(title = "重试", onClick = retry)
   }
 }
 
@@ -2401,75 +2974,424 @@ private fun AboutSettingsScreen(
   viewModel: MainViewModel,
   onBack: () -> Unit,
 ) {
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
   val isConnected by viewModel.isConnected.collectAsState()
-  val serverName by viewModel.serverName.collectAsState()
   val gatewayVersion by viewModel.gatewayVersion.collectAsState()
+  val activeGatewayStableId by viewModel.activeGatewayStableId.collectAsState()
+  val gateways by viewModel.gateways.collectAsState()
   val updateAvailable by viewModel.gatewayUpdateAvailable.collectAsState()
-  val latestVersion = updateAvailable?.latestVersion?.takeIf { it.isNotBlank() }
   val currentGatewayVersion = updateAvailable?.currentVersion?.takeIf { it.isNotBlank() } ?: gatewayVersion
   val appLocale = LocalConfiguration.current.locales[0]
-
-  SettingsDetailFrame(title = nativeString("About"), subtitle = nativeString("OpenClaw for Android."), icon = Icons.Default.Info, onBack = onBack) {
-    AboutHeroPanel()
-    AboutBuildIdentityPanel(
+  val identity =
+    aboutBuildIdentity(
       versionName = BuildConfig.VERSION_NAME,
       versionCode = BuildConfig.VERSION_CODE,
       gitCommit = BuildConfig.GIT_COMMIT,
       buildTimestamp = BuildConfig.BUILD_TIMESTAMP,
       locale = appLocale,
+      unknownLabel = stringResource(R.string.about_build_unknown),
     )
-    SettingsMetricPanel(
-      rows =
-        listOf(
-          SettingsMetric(nativeString("Channel"), androidDistributionChannel()),
-          SettingsMetric(nativeString("Gateway"), currentGatewayVersion ?: nativeString("Not connected")),
-        ),
+  val uriHandler = LocalUriHandler.current
+  var logCapturing by remember { mutableStateOf(false) }
+  // Reuse the transcript's morph-menu surface: it already grows the glass out
+  // of the trigger's measured bounds, scales its content, blurs mid-morph and
+  // folds back on dismiss — the exact animation the chat capsule/menus use.
+  val logMenuState = rememberClawMorphMenuState()
+  val logTrigger = rememberClawMorphTrigger(logMenuState)
+
+  val activeEndpoint = gateways.firstOrNull { it.stableId == activeGatewayStableId }
+  val gatewayType =
+    when {
+      !isConnected -> nativeString("未连接")
+      viewModel.gatewayProxyConfigured(activeGatewayStableId) -> nativeString("反向代理")
+      activeEndpoint?.tlsEnabled == true -> nativeString("TLS 直连")
+      else -> nativeString("HTTP 直连")
+    }
+  val commitClick: (() -> Unit)? =
+    identity.fullCommit?.let { commit ->
+      {
+        val clipboard = context.getSystemService(ClipboardManager::class.java)
+        clipboard?.setPrimaryClip(ClipData.newPlainText("OpenClaw commit", commit))
+        Toast.makeText(context, nativeString("Commit copied"), Toast.LENGTH_SHORT).show()
+      }
+    }
+
+  // HyperOS-style about page: a soft pastel gradient fills the ENTIRE screen —
+  // status bar included — as the page background, dissolving into the canvas
+  // colour towards the bottom so the groups appear to sit on it. The scaffold
+  // itself is transparent; the gradient is painted behind it.
+  val darkTheme = ClawTheme.colors.canvas.luminance() < 0.5f
+  val pageColors =
+    if (darkTheme) {
+      listOf(Color(0xFF3A2E44), Color(0xFF32324A), Color(0xFF2C3E58))
+    } else {
+      listOf(Color(0xFFFACCDA), Color(0xFFEADAF3), Color(0xFFC7D9F7))
+    }
+  val pageBrush = Brush.verticalGradient(pageColors + ClawTheme.colors.canvas)
+  // Title ink is the page gradient itself, deepened toward a neutral ink in the
+  // light theme and lifted toward white in the dark one. Same hue family as the
+  // backdrop, without the saturated two-colour tint that read as cheap.
+  val titleInk = if (darkTheme) Color.White else Color(0xFF241F29)
+  val titleMix = if (darkTheme) 0.55f else 0.68f
+  val titleBrush = Brush.verticalGradient(pageColors.map { base -> lerp(base, titleInk, titleMix) })
+  val listState = rememberLazyListState()
+  // 0 at rest, 1 once the hero spacer has fully scrolled off. The spacer is the
+  // first list item and exactly as tall as the static hero, so this is also how
+  // far the first card has travelled toward the top bar.
+  val scrollProgressState =
+    remember(listState) {
+      derivedStateOf {
+        if (listState.firstVisibleItemIndex > 0) {
+          1f
+        } else {
+          val spacerSize = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == 0 }?.size ?: 1
+          (listState.firstVisibleItemScrollOffset / spacerSize.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
+        }
+      }
+    }
+  val scrollProgress by scrollProgressState
+  // The hero does not scroll with the list: it fades, lifts and shrinks in
+  // place, finishing before the first card reaches the title's top edge.
+  val heroFadeState =
+    remember {
+      derivedStateOf { ((scrollProgressState.value - 0.10f) / 0.26f).coerceIn(0f, 1f) }
+    }
+  val versionFadeState =
+    remember {
+      derivedStateOf { (1f - scrollProgressState.value / 0.20f).coerceIn(0f, 1f) }
+    }
+  // The bar's chrome (glass disc, its rim, title) only exists once cards can
+  // slide underneath it; while the hero is flush with the top the bar reads as
+  // bare background with a floating chevron, HyperOS style.
+  val chromeOffsetThreshold = with(LocalDensity.current) { 8.dp.toPx() }
+  val chromeShown by
+    remember(listState, chromeOffsetThreshold) {
+      derivedStateOf {
+        listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > chromeOffsetThreshold
+      }
+    }
+  val chromeAlpha by
+    animateFloatAsState(
+      targetValue = if (chromeShown) 1f else 0f,
+      animationSpec = spring(dampingRatio = 1f, stiffness = Spring.StiffnessMediumLow),
+      label = "aboutTopBarChrome",
     )
-    ClawPanel(contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)) {
-      Column {
-        AboutStatusRow(title = nativeString("Gateway"), value = serverName?.takeIf { it.isNotBlank() } ?: nativeString("Home Gateway"), healthy = isConnected)
-        HorizontalDivider(color = ClawTheme.colors.border, thickness = 1.dp)
-        AboutStatusRow(title = nativeString("Runtime"), value = currentGatewayVersion ?: nativeString("Waiting"), healthy = currentGatewayVersion != null)
-        HorizontalDivider(color = ClawTheme.colors.border, thickness = 1.dp)
-        AboutStatusRow(
-          title = nativeString("Update"),
-          value = latestVersion?.let { nativeString("v\$it available", it) } ?: nativeString("Up to date"),
-          healthy = latestVersion == null,
+  val titleAlpha by
+    animateFloatAsState(
+      targetValue = if (scrollProgress > 0.38f) 1f else 0f,
+      animationSpec = spring(dampingRatio = 1f, stiffness = Spring.StiffnessMediumLow),
+      label = "aboutTopBarTitle",
+    )
+  val statusBarHeight = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+  val topBarHeight = statusBarHeight + ClawTopBarContentHeight
+  // Progressive blur, same kit as the chat header: the source is the *unpadded*
+  // page layer holding the gradient plus the scrolling cards, and the bar is a
+  // sibling that samples it — sampling a layer that contains the sampler would
+  // recurse through the render tree.
+  val aboutBackdrop = rememberClawBackdrop()
+  Box(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize().layerBackdrop(aboutBackdrop).background(brush = pageBrush)) {
+      BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val heroHeight = maxHeight * 0.40f
+        // Static hero: the list slides over it, so OpenClaw-X never travels
+        // with the scroll. Only its own fade/lift/shrink reads the scroll
+        // state, and the gradient behind it stays put entirely.
+        Box(
+          modifier = Modifier.fillMaxWidth().offset(y = topBarHeight).height(heroHeight),
+          contentAlignment = Alignment.Center,
+        ) {
+          Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Text(
+              text = "OpenClaw-X",
+              style =
+                ClawTheme.type.title.copy(
+                  fontSize = 34.sp,
+                  fontWeight = FontWeight.Bold,
+                  brush = titleBrush,
+                ),
+              modifier =
+                Modifier.graphicsLayer {
+                  val fade = heroFadeState.value
+                  alpha = 1f - fade
+                  translationY = -fade * 20.dp.toPx()
+                  val scale = 1f - 0.05f * fade
+                  scaleX = scale
+                  scaleY = scale
+                },
+            )
+            Text(
+              text = BuildConfig.VERSION_NAME,
+              style = ClawTheme.type.body,
+              color = ClawTheme.colors.textMuted,
+              modifier = Modifier.graphicsLayer { alpha = versionFadeState.value },
+            )
+          }
+        }
+        ClawScaffold(
+          containerColor = Color.Transparent,
+          contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom),
+          contentPadding = PaddingValues(start = ClawTheme.spacing.sm, top = 0.dp, end = ClawTheme.spacing.sm, bottom = ClawTheme.spacing.xxxs),
+        ) {
+          LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xs),
+            contentPadding = PaddingValues(top = topBarHeight, bottom = ClawTheme.spacing.xxxs),
+          ) {
+            item {
+              // Reserves exactly the hero's footprint so the first card starts
+              // below it; scrolling replaces this spacer with cards that slide
+              // over the fading hero.
+              Spacer(modifier = Modifier.fillMaxWidth().height(heroHeight))
+            }
+      item {
+        MiuixGroup {
+          AboutInfoRow(label = nativeString("二次开发"), value = "chenxi0yu")
+          AboutInfoRow(label = nativeString("软件版本"), value = identity.version)
+          AboutInfoRow(label = nativeString("提交"), value = identity.commit, onClick = commitClick, monospace = true)
+          AboutInfoRow(label = nativeString("构建日期"), value = identity.built)
+        }
+      }
+      item {
+        MiuixGroup {
+          // The device-card pattern: the section title lives INSIDE the card,
+          // above its stat rows — sized like a card title, not a hero heading.
+          Text(
+            text = "Gateway",
+            style = ClawTheme.type.title.copy(fontSize = 20.sp, fontWeight = FontWeight.SemiBold),
+            color = ClawTheme.colors.text,
+            modifier = Modifier.padding(start = 16.dp, top = 14.dp, bottom = 2.dp),
+          )
+          AboutGatewayStatRow(value = gatewayType, caption = nativeString("网关类型"))
+          AboutGatewayStatRow(value = currentGatewayVersion ?: "—", caption = nativeString("版本号"))
+        }
+      }
+      item {
+        MiuixGroup {
+          aboutLinks.forEach { link ->
+            MiuixValueRow(
+              title = aboutLinkTitle(link.title),
+              value = link.subtitle,
+              reserveIconSpace = false,
+              onClick = { uriHandler.openUri(link.url) },
+            )
+          }
+        }
+      }
+      item {
+        MiuixGroup {
+          // The menu grows out of the trailing "导出 ⇅" cluster through the
+          // transcript's shared morph surface; the whole row is the tap target.
+          Row(
+            modifier =
+              Modifier
+                .fillMaxWidth()
+                .clickable(role = Role.Button) {
+                  if (logCapturing) return@clickable
+                  logTrigger.open(
+                    origin = TransformOrigin(1f, 1f),
+                    panelWidth = 200.dp,
+                  ) {
+                    AppLogRange.entries.forEach { range ->
+                      ClawGlassMenuItem(
+                        label = range.title,
+                        icon =
+                          when (range) {
+                            AppLogRange.LastHour -> Icons.Default.Schedule
+                            AppLogRange.Today -> Icons.Default.Today
+                            AppLogRange.Full -> Icons.Default.Description
+                          },
+                        onClick = {
+                          if (logCapturing) return@ClawGlassMenuItem
+                          logCapturing = true
+                          scope.launch {
+                            val file = withContext(Dispatchers.IO) { captureAppLogSnapshot(context, range) }
+                            logCapturing = false
+                            if (file == null) {
+                              Toast.makeText(context, nativeString("日志提取失败"), Toast.LENGTH_SHORT).show()
+                            } else {
+                              shareAppLogSnapshot(context, file)
+                            }
+                          }
+                        },
+                      )
+                    }
+                  }
+                }
+                .padding(horizontal = 16.dp, vertical = 13.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+          ) {
+            Text(
+              text = nativeString("软件日志"),
+              style = ClawTheme.type.body.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium),
+              color = ClawTheme.colors.text,
+            )
+            Row(
+              modifier = logTrigger.modifier,
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              Text(
+                text = nativeString("导出"),
+                style = ClawTheme.type.body.copy(fontSize = 14.sp),
+                color = ClawTheme.colors.textMuted,
+                maxLines = 1,
+              )
+              Icon(
+                imageVector = Icons.Default.UnfoldMore,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = ClawTheme.colors.textMuted,
+              )
+            }
+          }
+        }
+      }
+      item {
+        Text(
+          text = nativeString("基于 OpenClaw 二次开发 · OpenClaw 采用 MIT 协议"),
+          style = ClawTheme.type.caption,
+          color = ClawTheme.colors.textSubtle,
+          modifier = Modifier.fillMaxWidth(),
+          textAlign = TextAlign.Center,
+        )
+      }
+          }
+        }
+      }
+    }
+    Box(
+      modifier = Modifier.fillMaxWidth().height(topBarHeight).clawBackdropTopBar(aboutBackdrop),
+    ) {
+      AboutTopBarBackButton(
+        contentDescription = nativeString("Back"),
+        chromeAlpha = chromeAlpha,
+        backdrop = aboutBackdrop,
+        onClick = onBack,
+        modifier = Modifier.align(Alignment.TopStart).padding(top = statusBarHeight + ClawTopBarButtonTopInset, start = ClawTheme.spacing.sm),
+      )
+      Box(
+        modifier = Modifier.align(Alignment.TopCenter).padding(top = statusBarHeight).height(ClawTopBarContentHeight).fillMaxWidth(),
+        contentAlignment = Alignment.Center,
+      ) {
+        Text(
+          text = nativeString("About"),
+          style = ClawTheme.type.title.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium),
+          color = ClawTheme.colors.text,
+          modifier =
+            Modifier.graphicsLayer {
+              alpha = titleAlpha
+              translationY = (1f - titleAlpha) * 10.dp.toPx()
+            },
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
         )
       }
     }
-    ClawPanel {
-      Text(text = aboutUpdateText(latestVersion = latestVersion), style = ClawTheme.type.body, color = ClawTheme.colors.textMuted)
-    }
-    AboutLinksPanel()
-    Text(
-      text = nativeString("© 2026 OpenClaw Foundation — MIT License."),
-      style = ClawTheme.type.caption,
-      color = ClawTheme.colors.textSubtle,
-      modifier = Modifier.fillMaxWidth(),
-      textAlign = TextAlign.Center,
+    // The transcript's shared morph surface draws the glass above everything,
+    // grows it from the "导出 ⇅" anchor and is click-through while collapsed.
+    ClawMorphMenuOverlay(
+      state = logMenuState,
+      onDismissRequest = { logMenuState.dismiss() },
+      backdrop = aboutBackdrop,
+      modifier = Modifier.fillMaxSize(),
     )
   }
 }
 
+/**
+ * HyperOS top-bar back disc: a 42dp circle that is pure glass — no elevation
+ * slab. At rest the glass and its rim are transparent and only the chevron
+ * floats over the gradient; once cards slide under the bar the disc fades in
+ * behind it.
+ */
 @Composable
-private fun AboutHeroPanel() {
-  ClawPanel {
-    Column(
-      modifier = Modifier.fillMaxWidth(),
-      horizontalAlignment = Alignment.CenterHorizontally,
-      verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs),
-    ) {
-      OpenClawMascot(contentDescription = nativeString("OpenClaw logo"), modifier = Modifier.size(96.dp))
-      Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(text = nativeString("OpenClaw"), style = ClawTheme.type.section, color = ClawTheme.colors.text)
-        Text(text = nativeString("Personal AI on your devices"), style = ClawTheme.type.caption, color = ClawTheme.colors.textMuted)
-      }
-    }
+private fun AboutTopBarBackButton(
+  contentDescription: String,
+  chromeAlpha: Float,
+  backdrop: Backdrop,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  ClawGlassTopBarButton(
+    contentDescription = contentDescription,
+    chromeAlpha = chromeAlpha,
+    backdrop = backdrop,
+    onClick = onClick,
+    modifier = modifier,
+  ) {
+    Icon(
+      imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+      contentDescription = null,
+      modifier = Modifier.size(22.dp),
+      tint = ClawTheme.colors.text,
+    )
   }
 }
 
-/** External project links; static first-party URLs matching the iOS and macOS About screens. */
+/** HyperOS-style about row: 17sp medium label on the left, muted value on the right. */
+@Composable
+private fun AboutInfoRow(
+  label: String,
+  value: String,
+  onClick: (() -> Unit)? = null,
+  monospace: Boolean = false,
+) {
+  Row(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+        .padding(horizontal = 16.dp, vertical = 13.dp),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.SpaceBetween,
+  ) {
+    Text(
+      text = label,
+      style = ClawTheme.type.body.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium),
+      color = ClawTheme.colors.text,
+    )
+    Text(
+      text = value,
+      style =
+        ClawTheme.type.body.copy(
+          fontSize = 14.sp,
+          fontFamily = if (monospace) FontFamily.Monospace else ClawTheme.type.body.fontFamily,
+        ),
+      color = ClawTheme.colors.textMuted,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+    )
+  }
+}
+
+/** HyperOS device-card stat: bold value on top, small muted caption below. */
+@Composable
+private fun AboutGatewayStatRow(
+  value: String,
+  caption: String,
+) {
+  Column(
+    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+    verticalArrangement = Arrangement.spacedBy(3.dp),
+  ) {
+    Text(
+      text = value,
+      style = ClawTheme.type.body.copy(fontSize = 15.sp, fontWeight = FontWeight.Medium),
+      color = ClawTheme.colors.text,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+    )
+    Text(text = caption, style = ClawTheme.type.caption.copy(fontSize = 12.sp), color = ClawTheme.colors.textMuted)
+  }
+}
+
+/** External project links; static first-party URLs plus the fork's own repository. */
 private data class AboutLink(
   val title: String,
   val subtitle: String,
@@ -2481,28 +3403,9 @@ private val aboutLinks =
     AboutLink("Website", "openclaw.ai", "https://openclaw.ai"),
     AboutLink("Docs", "docs.openclaw.ai", "https://docs.openclaw.ai"),
     AboutLink("GitHub", "github.com/openclaw/openclaw", "https://github.com/openclaw/openclaw"),
+    AboutLink("OpenClaw-X 仓库", "github.com/chenxi0yu/openclaw-x", "https://github.com/chenxi0yu/openclaw-x"),
     AboutLink("Discord", "discord.gg/clawd", "https://discord.gg/clawd"),
   )
-
-@Composable
-private fun AboutLinksPanel() {
-  val uriHandler = LocalUriHandler.current
-  ClawListPanel(items = aboutLinks) { link ->
-    ClawListItem(
-      title = aboutLinkTitle(link.title),
-      subtitle = link.subtitle,
-      onClick = { uriHandler.openUri(link.url) },
-      trailing = {
-        Icon(
-          imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-          contentDescription = null,
-          tint = ClawTheme.colors.textSubtle,
-          modifier = Modifier.size(16.dp),
-        )
-      },
-    )
-  }
-}
 
 @Composable
 private fun LicensesSettingsScreen(onBack: () -> Unit) {
@@ -2566,14 +3469,6 @@ private fun LicenseListRow(
   )
 }
 
-internal fun androidDistributionChannel(flavor: String = BuildConfig.FLAVOR): String =
-  when (flavor.trim()) {
-    "play" -> "Play"
-    "thirdParty" -> nativeString("Third-party")
-    "" -> nativeString("Unknown")
-    else -> flavor.trim()
-  }
-
 internal fun aboutLinkTitle(title: String): String =
   when (title) {
     "Website" -> nativeString("Website")
@@ -2587,33 +3482,6 @@ internal fun gatewaySettingsSetupResetConfirmationText(): String =
   nativeString(
     "Replacing the setup code clears this phone's saved setup credentials and device tokens before reconnecting. This phone may need node capability approval again; continue only when you mean to pair with a fresh gateway setup code.",
   )
-
-@Composable
-private fun AboutStatusRow(
-  title: String,
-  value: String,
-  healthy: Boolean,
-) {
-  Row(
-    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
-    verticalAlignment = Alignment.CenterVertically,
-    horizontalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs),
-  ) {
-    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-      Text(text = title, style = ClawTheme.type.body, color = ClawTheme.colors.text, maxLines = 1)
-      Text(text = value, style = ClawTheme.type.caption, color = ClawTheme.colors.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-    ClawStatusPill(text = if (healthy) "OK" else nativeString("Check"), status = if (healthy) ClawStatus.Success else ClawStatus.Warning)
-  }
-}
-
-/** Chooses about-screen copy based on whether the gateway advertises an update. */
-private fun aboutUpdateText(latestVersion: String?): String =
-  if (latestVersion == null) {
-    nativeString("OpenClaw turns this phone into a clean mobile command surface for threads, voice, providers, and Gateway.")
-  } else {
-    nativeString("A Gateway update is available. Run the update from the Web UI or CLI when you are ready.")
-  }
 
 @Composable
 internal fun SettingsRefreshControls(

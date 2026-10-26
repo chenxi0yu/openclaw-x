@@ -1,5 +1,6 @@
 package ai.openclaw.app
 
+import ai.openclaw.app.chat.CachedImage
 import ai.openclaw.app.chat.ChatMessage
 import ai.openclaw.app.chat.ChatSessionEntry
 import ai.openclaw.app.chat.ChatTranscriptCache
@@ -2104,6 +2105,19 @@ class GatewayBootstrapAuthTest {
     override suspend fun clearGateway(gatewayId: String) {
       clearedGatewayIds += gatewayId
     }
+
+    override suspend fun loadImage(
+      gatewayId: String,
+      source: String,
+    ): CachedImage? = null
+
+    override suspend fun saveImage(
+      gatewayId: String,
+      source: String,
+      image: CachedImage,
+    ) = Unit
+
+    override suspend fun clearImages() = Unit
   }
 }
 

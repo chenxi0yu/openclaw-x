@@ -204,6 +204,8 @@ class ChatController internal constructor(
   private val cacheScope: () -> ChatCacheScope? = { null },
   private val currentDefaultAgentId: () -> String? = { "main" },
   private val currentDefaultAgentRevision: () -> Long = { 0L },
+  private val loadCachedPinnedSessionKeys: (gatewayId: String, agentId: String) -> Set<String> = { _, _ -> emptySet() },
+  private val storeCachedPinnedSessionKeys: (gatewayId: String, agentId: String, keys: Set<String>) -> Unit = { _, _, _ -> },
   private val loadGatewayImageArtifact: suspend (
     gatewayId: String?,
     sessionKey: String,
@@ -232,6 +234,8 @@ class ChatController internal constructor(
     cacheScope: () -> ChatCacheScope? = { null },
     currentDefaultAgentId: () -> String? = { "main" },
     currentDefaultAgentRevision: () -> Long = { 0L },
+    loadCachedPinnedSessionKeys: (gatewayId: String, agentId: String) -> Set<String> = { _, _ -> emptySet() },
+    storeCachedPinnedSessionKeys: (gatewayId: String, agentId: String, keys: Set<String>) -> Unit = { _, _, _ -> },
     gatewayAdvertisesMethod: (method: String) -> Boolean? = { null },
     gatewayAdvertisesCapability: (capability: String) -> Boolean? = { null },
     currentGatewayCatalogRevision: () -> Long = { 0L },
@@ -258,6 +262,8 @@ class ChatController internal constructor(
     cacheScope = cacheScope,
     currentDefaultAgentId = currentDefaultAgentId,
     currentDefaultAgentRevision = currentDefaultAgentRevision,
+    loadCachedPinnedSessionKeys = loadCachedPinnedSessionKeys,
+    storeCachedPinnedSessionKeys = storeCachedPinnedSessionKeys,
     loadGatewayImageArtifact = { gatewayId, sessionKey, agentId, artifactId ->
       session.loadImageArtifact(gatewayId, sessionKey, agentId, artifactId)
     },
@@ -625,6 +631,10 @@ class ChatController internal constructor(
   private val presentedSessions = MutableStateFlow<List<ChatSessionEntry>>(emptyList())
   val sessions: StateFlow<List<ChatSessionEntry>> = presentedSessions.asStateFlow()
 
+  // Guarded by gatewayScopeApplyLock. A session created by "+" is a draft: it has no
+  // transcript yet, so the sidebar must not grow a "New chat" row until the first turn.
+  private val pendingFirstTurnSessionKeys = mutableSetOf<String>()
+
   private fun projectLocalSessionTitles(
     entries: List<ChatSessionEntry>,
     binding: MainSessionBinding?,
@@ -641,7 +651,21 @@ class ChatController internal constructor(
       // share a local fallback bound to this gateway and exact session key.
       _sessions.value = entries
       val binding = currentCacheScope()?.let { desiredMainSessions[it.gatewayId] }
-      presentedSessions.value = projectLocalSessionTitles(entries, binding)
+      val visibleEntries =
+        if (pendingFirstTurnSessionKeys.isEmpty()) {
+          entries
+        } else {
+          entries.filterNot { it.key in pendingFirstTurnSessionKeys }
+        }
+      presentedSessions.value = projectLocalSessionTitles(visibleEntries, binding)
+    }
+  }
+
+  private fun markSessionFirstTurnStarted(sessionKey: String) {
+    synchronized(gatewayScopeApplyLock) {
+      if (pendingFirstTurnSessionKeys.remove(sessionKey)) {
+        publishSessions(_sessions.value)
+      }
     }
   }
 
@@ -1158,6 +1182,7 @@ class ChatController internal constructor(
       clearProgressCard()
       clearSubagentActivities()
       clearLiveHistoryMarker()
+      pendingFirstTurnSessionKeys.clear()
       publishSessions(emptyList())
       publishRunPresentation()
       clearQuestions()
@@ -2698,9 +2723,13 @@ class ChatController internal constructor(
         }
       val res = requestSessionCreate(createGatewayScope, params, lease)
       val createdKey = parseCreatedSessionKey(json, res) ?: parentKey
+      // A plain New is a draft: keep its empty row out of the session list until the
+      // first turn actually exists. Catalog continuations start from an existing thread.
+      val isDraftSession = normalizedCatalogId == null && createdKey != parentKey
       val generation =
         applyIfCurrent {
           createContext.ensureActive()
+          if (isDraftSession) pendingFirstTurnSessionKeys += createdKey
           beginHistoryLoad(
             createdKey,
             ownerAgentId = ownerAgentId,
@@ -3572,6 +3601,8 @@ class ChatController internal constructor(
       publishOutbox()
       return true
     }
+    // The draft session has its first turn now, so it belongs in the session list.
+    markSessionFirstTurnStarted(effectiveSessionKey)
     if (!_healthOk.value) {
       // Captured for reconnect: the queued bubble is visible and flush delivers it later.
       return true
@@ -4881,6 +4912,10 @@ class ChatController internal constructor(
                 prunePersistedOptimisticMessages(history.messages)
                 _messagesFromCache.value = false
                 _messages.value = nextMessages
+                // A draft that gained its first turn elsewhere (another client) stops being a draft.
+                if (sessionKey in pendingFirstTurnSessionKeys && activeChatHasContent()) {
+                  markSessionFirstTurnStarted(sessionKey)
+                }
                 val previousAnchor = _transcriptAnchor.value?.takeIf { it.sessionKey == sessionKey }
                 val completionSettled =
                   markCompletedTranscript &&
@@ -5077,6 +5112,9 @@ class ChatController internal constructor(
     }
     if (_sessions.value.isEmpty()) {
       val cachedSessions = runCatching { cache.loadSessions(requestCacheScope.gatewayId, requestAgentId) }.getOrDefault(emptyList())
+      // Cache rows omit pin metadata; apply the last live pin set so pinned rows keep
+      // their place while the gateway is still connecting.
+      val cachedPinnedKeys = loadCachedPinnedSessionKeys(requestCacheScope.gatewayId, requestAgentId)
       synchronized(gatewayScopeApplyLock) {
         if (
           cachedSessions.isNotEmpty() &&
@@ -5086,7 +5124,12 @@ class ChatController internal constructor(
         ) {
           publishSessions(
             reconcileGlobalObserverDigestOwner(
-              cachedSessions.map { session -> session.copy(ownerAgentId = requestAgentId) },
+              cachedSessions.map { session ->
+                session.copy(
+                  ownerAgentId = requestAgentId,
+                  pinned = session.pinned ?: (session.key in cachedPinnedKeys),
+                )
+              },
               activeAgentId = requestAgentId,
             ),
           )
@@ -5219,6 +5262,16 @@ class ChatController internal constructor(
           )
         }
         if (!archived) {
+          if (requestCacheScope != null) {
+            storeCachedPinnedSessionKeys(
+              requestCacheScope.gatewayId,
+              requestAgentId,
+              appliedSessions
+                .filter { it.pinned == true }
+                .mapNotNull { it.key.trim().takeIf(String::isNotEmpty) }
+                .toSet(),
+            )
+          }
           persistSessions(requestCacheScope, requestAgentId, appliedSessions, retainedSessionKey)
         }
         return true

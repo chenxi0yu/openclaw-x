@@ -47,22 +47,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.outlined.Build
-import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.DesktopWindows
-import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.outlined.ErrorOutline
-import androidx.compose.material.icons.outlined.Folder
-import androidx.compose.material.icons.outlined.MarkEmailRead
-import androidx.compose.material.icons.outlined.MarkEmailUnread
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -97,13 +82,31 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.PathParser
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Add as MiuixAdd
+import top.yukonga.miuix.kmp.icon.extended.All as MiuixAll
+import top.yukonga.miuix.kmp.icon.extended.ChevronForward as MiuixChevronForward
+import top.yukonga.miuix.kmp.icon.extended.Close as MiuixClose
+import top.yukonga.miuix.kmp.icon.extended.Delete as MiuixDelete
+import top.yukonga.miuix.kmp.icon.extended.Edit as MiuixEdit
+import top.yukonga.miuix.kmp.icon.extended.Email as MiuixEmail
+import top.yukonga.miuix.kmp.icon.extended.Folder as MiuixFolder
+import top.yukonga.miuix.kmp.icon.extended.Home as MiuixHome
+import top.yukonga.miuix.kmp.icon.extended.Messages as MiuixMessages
+import top.yukonga.miuix.kmp.icon.extended.Ok as MiuixOk
+import top.yukonga.miuix.kmp.icon.extended.Pin as MiuixPin
+import top.yukonga.miuix.kmp.icon.extended.Refresh as MiuixRefresh
+import top.yukonga.miuix.kmp.icon.extended.Rename as MiuixRename
+import top.yukonga.miuix.kmp.icon.extended.Report as MiuixReport
+import top.yukonga.miuix.kmp.icon.extended.Search as MiuixSearch
+import top.yukonga.miuix.kmp.icon.extended.Settings as MiuixSettings
+import top.yukonga.miuix.kmp.icon.extended.Tasks as MiuixTasks
+import top.yukonga.miuix.kmp.icon.extended.Unpin as MiuixUnpin
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -130,53 +133,13 @@ internal enum class SidebarDestination(
   val stableId: String,
   val icon: ImageVector,
 ) {
-  Settings(stableId = "settings", icon = SidebarLucideIcons.Settings),
-  Work(stableId = "work", icon = SidebarLucideIcons.Briefcase),
-  Home(stableId = "home", icon = SidebarLucideIcons.Home),
-  Skills(stableId = "skills", icon = Icons.Outlined.Build),
-  Threads(stableId = "threads", icon = Icons.Outlined.Description),
-}
-
-private object SidebarLucideIcons {
-  private fun icon(name: String, paths: List<String>): ImageVector =
-    ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f).apply {
-      paths.forEach { data ->
-        addPath(
-          pathData = PathParser().parsePathString(data).toNodes(),
-          fill = null,
-          stroke = androidx.compose.ui.graphics.SolidColor(androidx.compose.ui.graphics.Color.Black),
-          strokeLineWidth = 2f,
-          strokeLineCap = androidx.compose.ui.graphics.StrokeCap.Round,
-          strokeLineJoin = androidx.compose.ui.graphics.StrokeJoin.Round,
-        )
-      }
-    }.build()
-
-  val Settings = icon(
-    "LucideSettings",
-    listOf(
-      "M12 2.5a2 2 0 0 0-2 2v.3a2 2 0 0 1-1 1.73l-.27.16a2 2 0 0 1-2 0l-.26-.15a2 2 0 1 0-2 3.46l.26.15a2 2 0 0 1 1 1.73v.32a2 2 0 0 1-1 1.73l-.26.15a2 2 0 1 0 2 3.46l.26-.15a2 2 0 0 1 2 0l.27.16a2 2 0 0 1 1 1.73v.3a2 2 0 0 0 4 0v-.3a2 2 0 0 1 1-1.73l.27-.16a2 2 0 0 1 2 0l.26.15a2 2 0 1 0 2-3.46l-.26-.15a2 2 0 0 1-1-1.73v-.32a2 2 0 0 1 1-1.73l.26-.15a2 2 0 1 0-2-3.46l-.26.15a2 2 0 0 1-2 0l-.27-.16a2 2 0 0 1-1-1.73v-.3a2 2 0 0 0-2-2Z",
-      "M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z",
-    ),
-  )
-
-  val Briefcase = icon(
-    "LucideBriefcase",
-    listOf(
-      "M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2",
-      "M4 7h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z",
-      "M2 12h20",
-    ),
-  )
-
-  val Home = icon(
-    "LucideHouse",
-    listOf(
-      "m3 10 9-7 9 7",
-      "M5 9v11h14V9",
-      "M9 20v-6h6v6",
-    ),
-  )
+  // HyperOS icon set (Medium weight) replaces the previous mixed
+  // Lucide/Material strokes so the drawer matches the system look.
+  Settings(stableId = "settings", icon = MiuixIcons.Medium.MiuixSettings),
+  Work(stableId = "work", icon = MiuixIcons.Medium.MiuixTasks),
+  Home(stableId = "home", icon = MiuixIcons.Medium.MiuixHome),
+  Skills(stableId = "skills", icon = MiuixIcons.Medium.MiuixAll),
+  Threads(stableId = "threads", icon = MiuixIcons.Medium.MiuixMessages),
 }
 
 internal fun SidebarDestination.localizedLabel(): String =
@@ -241,7 +204,7 @@ private val Int.sign: Int
       else -> 0
     }
 
-private const val SIDEBAR_SESSION_LIMIT = 8
+private const val SIDEBAR_SESSION_LIMIT = 12
 
 internal data class SidebarSessionPresentation(
   val recentSections: List<SessionSection>,
@@ -645,7 +608,7 @@ internal fun OpenClawSidebar(
         modifier = Modifier.size(48.dp).testTag("sidebar-search-toggle"),
       ) {
         Icon(
-          imageVector = Icons.Default.Search,
+          imageVector = MiuixIcons.Medium.MiuixSearch,
           contentDescription = nativeString(if (searchVisible) "Hide search" else "Search sessions"),
           tint = palette.text,
           modifier = Modifier.size(20.dp),
@@ -664,7 +627,7 @@ internal fun OpenClawSidebar(
           CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp, color = palette.text)
         } else {
           Icon(
-            imageVector = Icons.Default.Add,
+            imageVector = MiuixIcons.Medium.MiuixAdd,
             contentDescription = null,
             tint = palette.text,
             modifier = Modifier.size(22.dp),
@@ -674,7 +637,7 @@ internal fun OpenClawSidebar(
       if (showCloseButton) {
         IconButton(onClick = onClose, modifier = Modifier.size(48.dp).testTag("sidebar-close")) {
           Icon(
-            imageVector = Icons.Default.Close,
+            imageVector = MiuixIcons.Medium.MiuixClose,
             contentDescription = nativeString("Hide Sidebar"),
             tint = palette.text,
             modifier = Modifier.size(20.dp),
@@ -900,7 +863,7 @@ internal fun OpenClawSidebar(
                               modifier = Modifier.size(40.dp),
                             ) {
                               Icon(
-                                imageVector = Icons.Default.Add,
+                                imageVector = MiuixIcons.Medium.MiuixAdd,
                                 contentDescription = nativeString("New session"),
                                 tint = palette.text,
                                 modifier = Modifier.size(18.dp),
@@ -997,12 +960,8 @@ internal fun OpenClawSidebar(
           if (recentPresentation.canExpandRecent) {
             SidebarActionRow(
               label = nativeString(if (sessionsExpanded) "Show less" else "Show more"),
-              icon =
-                if (sessionsExpanded) {
-                  Icons.Default.KeyboardArrowUp
-                } else {
-                  Icons.Default.KeyboardArrowDown
-                },
+              icon = MiuixIcons.Medium.MiuixChevronForward,
+              iconRotationZ = if (sessionsExpanded) -90f else 90f,
               palette = palette,
               onClick = { sessionsExpanded = !sessionsExpanded },
             )
@@ -1118,17 +1077,18 @@ private fun sidebarSessionMenu(
   return {
     ClawGlassMenuItem(
       label = pinLabel,
-      icon = Icons.Default.PushPin,
+      icon = if (pinned) MiuixIcons.Medium.MiuixUnpin else MiuixIcons.Medium.MiuixPin,
       selected = pinned,
       onClick = { onSetPinned(!pinned) },
     )
     ClawGlassMenuItem(
       label = unreadLabel,
-      icon = if (unread) Icons.Outlined.MarkEmailRead else Icons.Outlined.MarkEmailUnread,
+      icon = MiuixIcons.Medium.MiuixEmail,
+      selected = unread,
       onClick = { onSetUnread(!unread) },
     )
-    ClawGlassMenuItem(label = renameLabel, icon = Icons.Outlined.Edit, onClick = onRename)
-    ClawGlassMenuItem(label = deleteLabel, icon = Icons.Outlined.Delete, danger = true, onClick = onDelete)
+    ClawGlassMenuItem(label = renameLabel, icon = MiuixIcons.Medium.MiuixRename, onClick = onRename)
+    ClawGlassMenuItem(label = deleteLabel, icon = MiuixIcons.Medium.MiuixDelete, danger = true, onClick = onDelete)
   }
 }
 
@@ -1164,17 +1124,7 @@ private fun SidebarPagesHeader(
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-      Icon(
-        imageVector =
-          if (expanded) {
-            Icons.Default.KeyboardArrowDown
-          } else {
-            Icons.AutoMirrored.Filled.KeyboardArrowRight
-          },
-        contentDescription = null,
-        tint = palette.muted,
-        modifier = Modifier.size(18.dp),
-      )
+      SidebarChevron(expanded = expanded, palette = palette)
       Text(
         text = nativeString("Pages"),
         style = ClawTheme.type.caption.copy(fontWeight = FontWeight.Medium, fontSize = 12.sp),
@@ -1189,7 +1139,7 @@ private fun SidebarPagesHeader(
         modifier = Modifier.size(44.dp).testTag("sidebar-pages-menu"),
       ) {
         Icon(
-          painter = painterResource(R.drawable.ic_web_pen_line),
+          imageVector = MiuixIcons.Medium.MiuixEdit,
           contentDescription = nativeString("Edit pinned items"),
           tint = palette.text,
           modifier = Modifier.size(18.dp),
@@ -1220,7 +1170,7 @@ private fun SidebarPagesHeader(
                 trailingIcon = {
                   if (destination == activeDestination) {
                     Icon(
-                      painter = painterResource(R.drawable.ic_web_check),
+                      imageVector = MiuixIcons.Medium.MiuixOk,
                       contentDescription = nativeString("Selected"),
                       tint = palette.text,
                       modifier = Modifier.size(18.dp),
@@ -1238,7 +1188,7 @@ private fun SidebarPagesHeader(
               text = { Text(nativeString("Edit pinned items"), maxLines = 1) },
               leadingIcon = {
                 Icon(
-                  painter = painterResource(R.drawable.ic_web_pen_line),
+                  imageVector = MiuixIcons.Medium.MiuixEdit,
                   contentDescription = null,
                   tint = palette.text,
                   modifier = Modifier.size(18.dp),
@@ -1278,7 +1228,7 @@ private fun SidebarPagesHeader(
               text = { Text(nativeString("Reset pinned items"), maxLines = 1) },
               leadingIcon = {
                 Icon(
-                  painter = painterResource(R.drawable.ic_web_refresh),
+                  imageVector = MiuixIcons.Medium.MiuixRefresh,
                   contentDescription = null,
                   tint = palette.text,
                   modifier = Modifier.size(18.dp),
@@ -1337,13 +1287,7 @@ private fun SidebarSessionCatalog(
           verticalAlignment = Alignment.CenterVertically,
           horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-          Icon(
-            imageVector =
-              if (hostExpanded) Icons.Default.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = null,
-            tint = palette.muted,
-            modifier = Modifier.size(18.dp),
-          )
+          SidebarChevron(expanded = hostExpanded, palette = palette)
           Icon(
             imageVector = Icons.Outlined.DesktopWindows,
             contentDescription = null,
@@ -1360,7 +1304,7 @@ private fun SidebarSessionCatalog(
           when {
             !host.errorText.isNullOrBlank() -> {
               Icon(
-                imageVector = Icons.Outlined.ErrorOutline,
+                imageVector = MiuixIcons.Medium.MiuixReport,
                 contentDescription = nativeString("Host error"),
                 tint = ClawTheme.colors.danger,
                 modifier = Modifier.size(16.dp),
@@ -1402,19 +1346,9 @@ private fun SidebarSessionCatalog(
               verticalAlignment = Alignment.CenterVertically,
               horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
+              SidebarChevron(expanded = expanded, palette = palette)
               Icon(
-                imageVector =
-                  if (expanded) {
-                    Icons.Default.KeyboardArrowDown
-                  } else {
-                    Icons.AutoMirrored.Filled.KeyboardArrowRight
-                  },
-                contentDescription = null,
-                tint = palette.muted,
-                modifier = Modifier.size(18.dp),
-              )
-              Icon(
-                imageVector = Icons.Outlined.Folder,
+                imageVector = MiuixIcons.Medium.MiuixFolder,
                 contentDescription = null,
                 tint = palette.muted,
                 modifier = Modifier.size(16.dp),
@@ -1473,7 +1407,8 @@ private fun SidebarSessionCatalog(
           } else {
             SidebarActionRow(
               label = nativeString("Load more"),
-              icon = Icons.Default.KeyboardArrowDown,
+              icon = MiuixIcons.Medium.MiuixChevronForward,
+              iconRotationZ = 90f,
               palette = palette,
               onClick = { onLoadMore(catalogId) },
             )

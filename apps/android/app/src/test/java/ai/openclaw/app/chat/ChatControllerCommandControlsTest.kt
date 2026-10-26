@@ -207,6 +207,33 @@ class ChatControllerCommandControlsTest {
     }
 
   @Test
+  fun newChatAppearsInSessionListOnlyAfterFirstSend() =
+    runTest {
+      val draftKey = "agent:main:dashboard:fresh"
+      val (controller, _) =
+        chatControllerTestSetup {
+          respond("sessions.create", """{"ok":true,"key":"$draftKey"}""")
+          respond(
+            "chat.history",
+            """{"sessionId":"fresh-session","messages":[],"sessionInfo":{"key":"$draftKey","agentId":"main","sessionId":"fresh-session"}}""",
+          )
+          respond("sessions.list", """{"sessions":[{"key":"$draftKey","sessionId":"fresh-session","lastActivityAt":1}]}""")
+          respond("health", "{}")
+          respond("chat.send", """{"runId":"run-1"}""")
+        }
+      controller.handleGatewayEvent("health", null)
+      controller.load("main")
+      advanceUntilIdle()
+
+      assertTrue(controller.startNewChatAwait())
+      advanceUntilIdle()
+      assertFalse(controller.sessions.value.any { it.key == draftKey })
+
+      assertTrue(controller.sendMessageAwaitAcceptance("hello", "off", emptyList()))
+      assertTrue(controller.sessions.value.any { it.key == draftKey })
+    }
+
+  @Test
   fun lockedParentRejectsGenericForkAndWorktreeChats() =
     runTest {
       for (action in listOf("fork", "worktree")) {

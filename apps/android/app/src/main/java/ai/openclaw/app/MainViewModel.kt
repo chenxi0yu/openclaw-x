@@ -573,6 +573,8 @@ class MainViewModel private constructor(
   val devicePairingCapabilities: StateFlow<GatewayDevicePairingCapabilities> =
     runtimeState(initial = GatewayDevicePairingCapabilities()) { it.devicePairingCapabilities }
   val operatorScopes: StateFlow<List<String>> = runtimeState(initial = emptyList()) { it.operatorScopes }
+  internal val gatewayProfile: StateFlow<GatewayProfileState> =
+    runtimeState(initial = GatewayProfileState.Loading) { it.gatewayProfile }
   val devicePairingMutation: StateFlow<GatewayDevicePairingMutation?> =
     runtimeState(initial = null) { it.devicePairingMutation }
   internal val channelsState = runtimeState(initial = GatewaySummaryState<GatewayChannelsSummary>()) { it.channelsState }
@@ -781,9 +783,24 @@ class MainViewModel private constructor(
     runtimeRef.value?.refreshNodePermissionSurface()
   }
 
-  fun setDisplayName(value: String) {
-    prefs.setDisplayName(value)
-  }
+  internal suspend fun ensureGatewayProfileLoaded(): GatewayProfileRefreshResult =
+    runtimeRef.value?.refreshGatewayProfile(forceRefresh = false)
+      ?: GatewayProfileRefreshResult.Disconnected
+
+  internal suspend fun refreshGatewayProfile(): GatewayProfileRefreshResult =
+    runtimeRef.value?.refreshGatewayProfile(forceRefresh = true)
+      ?: GatewayProfileRefreshResult.Disconnected
+
+  internal suspend fun setGatewayProfileDisplayName(displayName: String?): GatewayProfileWriteResult =
+    runtimeRef.value?.setGatewayProfileDisplayName(displayName)
+      ?: GatewayProfileWriteResult.Disconnected
+
+  internal suspend fun setGatewayProfileAvatar(upload: GatewayProfileAvatarUpload): GatewayProfileWriteResult =
+    runtimeRef.value?.setGatewayProfileAvatar(upload)
+      ?: GatewayProfileWriteResult.Disconnected
+
+  internal suspend fun loadGatewayProfileAvatar(forceRefresh: Boolean = false): GatewayProfileAvatarImage? =
+    runtimeRef.value?.loadGatewayProfileAvatar(forceRefresh = forceRefresh)
 
   fun setCameraEnabled(value: Boolean) {
     runtimeRef.value?.setCameraEnabled(value) ?: prefs.setCameraEnabled(value)
@@ -1455,6 +1472,19 @@ class MainViewModel private constructor(
     kind: GatewayMediaKind,
     playbackRendition: Boolean,
   ) = ensureRuntime().loadChatMediaArtifact(artifactId, kind, playbackRendition)
+
+  internal suspend fun createChatShare(
+    sessionKey: String,
+    messageIds: List<String>,
+  ): SessionShareOutcome = ensureRuntime().createSessionShare(sessionKey, messageIds)
+
+  internal suspend fun listChatShares(): SessionShareListOutcome = ensureRuntime().listSessionShares()
+
+  internal suspend fun deleteChatShare(id: String): SessionShareDeleteOutcome = ensureRuntime().deleteSessionShare(id)
+
+  /** Whether the gateway rides a trusted reverse proxy (custom forward headers configured). */
+  internal fun gatewayProxyConfigured(stableId: String?): Boolean =
+    stableId != null && prefs.loadGatewayCustomHeaders(stableId).isNotEmpty()
 
   fun refreshModelCatalog() {
     ensureRuntime().refreshModelCatalog()

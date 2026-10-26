@@ -11,6 +11,7 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.outlined.AccessTime
@@ -43,6 +44,7 @@ internal enum class SettingsRoute(
   Approvals(nativeText("Approvals"), Icons.Default.Lock, SettingsCategory.AgentsAutomation),
   CronJobs(nativeText("Automations"), Icons.Outlined.AccessTime, SettingsCategory.AgentsAutomation),
   Usage(nativeText("Usage"), Icons.Default.Storage, SettingsCategory.AgentsAutomation),
+  Share(nativeText("Share"), Icons.Default.Share, SettingsCategory.AgentsAutomation),
   Skills(nativeText("Skills"), Icons.Default.Settings, SettingsCategory.AgentsAutomation),
   SkillWorkshop(nativeText("Skill Workshop"), Icons.Default.Settings, SettingsCategory.AgentsAutomation),
   SystemAgent(nativeText("OpenClaw"), Icons.Default.Bolt, SettingsCategory.AgentsAutomation),

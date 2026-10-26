@@ -354,6 +354,8 @@ dependencies {
   implementation(libs.haze)
   implementation(libs.haze.blur)
   implementation(libs.backdrop)
+  // HyperOS icon set for the sidebar destinations; icons only, no UI kit.
+  implementation(libs.miuix.icons)
 
   debugImplementation(libs.androidx.compose.ui.tooling)
 

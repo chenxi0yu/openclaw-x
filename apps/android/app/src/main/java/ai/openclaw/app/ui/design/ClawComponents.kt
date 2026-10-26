@@ -75,13 +75,15 @@ internal fun ClawScaffold(
   modifier: Modifier = Modifier,
   contentPadding: PaddingValues = PaddingValues(horizontal = ClawTheme.spacing.sm, vertical = ClawTheme.spacing.xxs),
   contentWindowInsets: WindowInsets = WindowInsets.safeDrawing,
+  /** Override for pages that paint their own full-bleed background behind this scaffold. */
+  containerColor: Color = ClawTheme.colors.canvas,
   content: @Composable () -> Unit,
 ) {
   Box(
     modifier =
       modifier
         .fillMaxSize()
-        .background(ClawTheme.colors.canvas)
+        .background(containerColor)
         .windowInsetsPadding(contentWindowInsets)
         .padding(contentPadding),
   ) {

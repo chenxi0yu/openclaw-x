@@ -90,6 +90,8 @@ internal fun ChatMessageActionHost(
   showSessionActions: Boolean = false,
   onRewind: (() -> Unit)? = null,
   onFork: (() -> Unit)? = null,
+  /** Batch-share entry. Null callers (previews, non-transcript bubbles) keep the direct chooser. */
+  onShare: (() -> Unit)? = null,
   enabled: Boolean = true,
   listenActive: Boolean = false,
   onToggleListen: (() -> Unit)? = null,
@@ -137,7 +139,7 @@ internal fun ChatMessageActionHost(
       ClawGlassMenuItem(
         label = nativeString("Share"),
         icon = Icons.Default.Share,
-        onClick = { shareChatMessage(context, text) },
+        onClick = onShare ?: { shareChatText(context, text) },
       )
       ClawGlassMenuItem(
         label = nativeString("Reply"),
@@ -272,13 +274,14 @@ internal fun ChatTextReaderDialog(
 internal fun copyChatText(
   context: Context,
   text: String,
+  toastLabel: String = nativeString("Text copied"),
 ) {
   val clipboard = context.getSystemService(ClipboardManager::class.java)
   clipboard.setPrimaryClip(ClipData.newPlainText("OpenClaw text", text))
-  Toast.makeText(context, nativeString("Text copied"), Toast.LENGTH_SHORT).show()
+  Toast.makeText(context, toastLabel, Toast.LENGTH_SHORT).show()
 }
 
-private fun shareChatMessage(
+internal fun shareChatText(
   context: Context,
   text: String,
 ) {
@@ -289,6 +292,40 @@ private fun shareChatMessage(
   val chooser = Intent.createChooser(sendIntent, nativeString("Share message"))
   if (context !is Activity) chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
   runCatching { context.startActivity(chooser) }
+    .onFailure {
+      Toast.makeText(context, nativeString("No app can share this message"), Toast.LENGTH_SHORT).show()
+    }
+}
+
+/**
+ * Hands a share link to WeChat via the system share sheet, targeting the WeChat
+ * package. When the package cannot be resolved (not installed, or hidden by
+ * package visibility), fall back to the generic chooser instead of failing.
+ *
+ * The text is the bare URL and nothing else: WeChat only turns the message into
+ * a link card when the whole payload is a URL. A title line prefix makes it a
+ * plain text message, which is why sharing with a title never produced a card.
+ */
+internal fun shareChatLinkToWeChat(
+  context: Context,
+  url: String,
+) {
+  fun shareIntent(): Intent =
+    Intent(Intent.ACTION_SEND)
+      .setType("text/plain")
+      .putExtra(Intent.EXTRA_TEXT, url)
+
+  val weChatIntent = shareIntent().setPackage("com.tencent.mm")
+  val resolved =
+    runCatching { weChatIntent.resolveActivity(context.packageManager) }.getOrNull() != null
+  val intent =
+    if (resolved) {
+      weChatIntent
+    } else {
+      Intent.createChooser(shareIntent(), nativeString("Share message"))
+    }
+  if (context !is Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+  runCatching { context.startActivity(intent) }
     .onFailure {
       Toast.makeText(context, nativeString("No app can share this message"), Toast.LENGTH_SHORT).show()
     }

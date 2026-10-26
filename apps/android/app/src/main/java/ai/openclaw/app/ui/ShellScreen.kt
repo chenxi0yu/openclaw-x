@@ -8,6 +8,9 @@ import ai.openclaw.app.GatewayConnectionProblem
 import ai.openclaw.app.GatewayDreamingSummary
 import ai.openclaw.app.GatewayNodeCapabilityApproval
 import ai.openclaw.app.GatewayNodesDevicesSummary
+import ai.openclaw.app.GatewayProfile
+import ai.openclaw.app.GatewayProfileAvatarImage
+import ai.openclaw.app.GatewayProfileState
 import ai.openclaw.app.GatewaySkillSummary
 import ai.openclaw.app.GatewaySkillWorkshopSummary
 import ai.openclaw.app.GatewaySummaryState
@@ -28,6 +31,7 @@ import ai.openclaw.app.ui.design.AgentAvatarSource
 import ai.openclaw.app.ui.design.ClawAgentAvatar
 import ai.openclaw.app.ui.design.ClawDesignTheme
 import ai.openclaw.app.ui.design.ClawEmptyState
+import ai.openclaw.app.ui.design.ClawGlassTopBarButton
 import ai.openclaw.app.ui.design.ClawListItem
 import ai.openclaw.app.ui.design.ClawPanel
 import ai.openclaw.app.ui.design.ClawPlainIconButton
@@ -37,6 +41,10 @@ import ai.openclaw.app.ui.design.ClawSecondaryButton
 import ai.openclaw.app.ui.design.ClawSeparatedColumn
 import ai.openclaw.app.ui.design.ClawStatus
 import ai.openclaw.app.ui.design.ClawTheme
+import ai.openclaw.app.ui.design.ClawTopBarButtonTopInset
+import ai.openclaw.app.ui.design.ClawTopBarContentHeight
+import ai.openclaw.app.ui.design.clawBackdropTopBar
+import ai.openclaw.app.ui.design.rememberClawBackdrop
 import ai.openclaw.app.ui.design.LocalClawHapticsEnabled
 import ai.openclaw.app.ui.design.OpenClawMascot
 import ai.openclaw.app.ui.design.SIDEBAR_BLUR_MS
@@ -49,26 +57,37 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -80,6 +99,7 @@ import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Notifications
@@ -100,6 +120,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -114,14 +135,20 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.window.layout.DisplayFeature
+import com.kyant.backdrop.Backdrop
+import com.kyant.backdrop.backdrops.layerBackdrop
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -185,6 +212,12 @@ fun ShellScreen(
         // Mode changes discard modal operations and their drag state, not the two content slots.
         val sidebarDrawerState = key(permanentSidebar) { rememberDrawerState(initialValue = DrawerValue.Closed) }
         var sidebarRowDragging by remember(sidebarDrawerState) { mutableStateOf(false) }
+        // The chat's share picker is modal: an edge swipe must not open the drawer
+        // over it. ChatScreen publishes the lifecycle of that mode here.
+        var chatSelectionMode by remember { mutableStateOf(false) }
+        // Same for the share card, whose own layer turns the edge swipe into a
+        // card dismissal instead of a drawer open.
+        var chatSharePanelOpen by remember { mutableStateOf(false) }
         val drawerScope = key(sidebarDrawerState) { rememberCoroutineScope() }
         val openSidebar: () -> Unit = {
           if (!permanentSidebar) drawerScope.launch { sidebarDrawerState.open() }
@@ -317,7 +350,8 @@ fun ShellScreen(
             bookPanes = bookPanes,
             sidebarBand = foldBounds.sidebarBand,
             gesturesEnabled = !sidebarRowDragging,
-            edgeSwipeEnabled = nav.activeTab == Tab.Chat,
+            edgeSwipeEnabled =
+              nav.activeTab == Tab.Chat && !chatSelectionMode && !chatSharePanelOpen,
             drawerContent = {
               OpenClawSidebar(
                 viewModel = viewModel,
@@ -408,6 +442,11 @@ fun ShellScreen(
                     onOpenDashboard = nav::openSessionDashboard,
                     onOpenGatewaySettings = { nav.openSettingsRoute(SettingsRoute.Gateway) },
                     onOpenProvidersModels = { nav.openDetailTab(Tab.ProvidersModels) },
+                    onSelectionModeChange = { active ->
+                      chatSelectionMode = active
+                      if (active) closeSidebar()
+                    },
+                    onSharePanelChange = { active -> chatSharePanelOpen = active },
                   )
                 }
 
@@ -1293,10 +1332,7 @@ private val sessionSourceLabels =
     "workspace" to "Workspace",
   )
 
-internal fun sessionSourceLabel(
-  sessionKey: String,
-  channelsSummary: GatewayChannelsSummary? = null,
-): String {
+internal fun sessionSourceKey(sessionKey: String): String? {
   val normalized = sessionKey.trim()
   val scopedKey =
     if (normalized.startsWith("agent:", ignoreCase = true)) {
@@ -1304,8 +1340,15 @@ internal fun sessionSourceLabel(
     } else {
       normalized
     }
-  if (!scopedKey.contains(':') && !scopedKey.contains('#')) return nativeString("OpenClaw")
-  val source = scopedKey.substringBefore(':').substringBefore('#').lowercase()
+  if (!scopedKey.contains(':') && !scopedKey.contains('#')) return null
+  return scopedKey.substringBefore(':').substringBefore('#').lowercase()
+}
+
+internal fun sessionSourceLabel(
+  sessionKey: String,
+  channelsSummary: GatewayChannelsSummary? = null,
+): String {
+  val source = sessionSourceKey(sessionKey) ?: return nativeString("OpenClaw")
   val channelLabel =
     channelsSummary
       ?.channels
@@ -1577,6 +1620,7 @@ private fun SettingsShellScreen(
 
   LaunchedEffect(isConnected) {
     if (isConnected) {
+      viewModel.ensureGatewayProfileLoaded()
       viewModel.refreshAgents()
       viewModel.refreshModelCatalog()
       viewModel.refreshProviderModels()
@@ -1623,9 +1667,15 @@ private fun SettingsHomeScreen(
   onRouteChange: (SettingsRoute) -> Unit,
   onOpenCommand: () -> Unit,
 ) {
-  val displayName by viewModel.displayName.collectAsState()
+  val gatewayProfileState by viewModel.gatewayProfile.collectAsState()
+  val gatewayProfile = (gatewayProfileState as? GatewayProfileState.Ready)?.profile
+  val activeGatewayStableId by viewModel.activeGatewayStableId.collectAsState()
   val gatewayConnectionDisplay by viewModel.gatewayConnectionDisplay.collectAsState()
   val isConnected = gatewayConnectionDisplay.isConnected
+
+  LaunchedEffect(activeGatewayStableId) {
+    viewModel.ensureGatewayProfileLoaded()
+  }
   val systemAgentChatState by viewModel.systemAgentChatState.collectAsState()
   val models by viewModel.providerModelCatalog.collectAsState()
   val providers by viewModel.modelAuthProviders.collectAsState()
@@ -1656,51 +1706,167 @@ private fun SettingsHomeScreen(
 
   val appLanguage = currentAppLanguage()
 
-  ClawScaffold(
-    contentPadding = PaddingValues(start = 16.dp, top = 10.dp, end = 16.dp, bottom = 4.dp),
-    contentWindowInsets = shellContentInsets,
-  ) {
-    LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(9.dp), contentPadding = PaddingValues(bottom = 4.dp)) {
-      item {
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(9.dp),
-        ) {
-          if (showSidebarButton) {
-            ClawPlainIconButton(
-              icon = Icons.Default.Menu,
-              contentDescription = nativeString("Show Sidebar"),
-              onClick = onOpenSidebar,
-              modifier = Modifier.testTag("sidebar-open-settings"),
-            )
-          }
-          Text(text = nativeString("Settings"), style = ClawTheme.type.display.copy(fontSize = 24.sp, lineHeight = 28.sp), color = ClawTheme.colors.text, modifier = Modifier.weight(1f))
-          ClawPlainIconButton(
-            icon = Icons.Default.Search,
-            contentDescription = nativeString("Search settings"),
-            onClick = onOpenCommand,
-          )
+  val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+  val darkTheme = ClawTheme.colors.canvas.luminance() < 0.5f
+  val statusBarHeight = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+  val topBarHeight = statusBarHeight + ClawTopBarContentHeight
+  val topBackdrop = rememberClawBackdrop()
+  // The big Settings title scrolls away; the small centered title fades in as
+  // it passes under the bar, HyperOS style.
+  val scrollProgress by
+    remember(listState) {
+      derivedStateOf {
+        if (listState.firstVisibleItemIndex > 0) {
+          1f
+        } else {
+          val headerSize = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == 0 }?.size ?: 1
+          (listState.firstVisibleItemScrollOffset / (headerSize * 0.5f).coerceAtLeast(1f)).coerceIn(0f, 1f)
         }
       }
+    }
+  // Cross-fade: the large Settings title is gone by the time the top-bar title
+  // finishes fading in, so the two never read as duplicates mid-scroll.
+  val bigTitleAlphaState =
+    remember(listState) {
+      derivedStateOf {
+        val progress =
+          if (listState.firstVisibleItemIndex > 0) {
+            1f
+          } else {
+            val headerSize = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == 0 }?.size ?: 1
+            (listState.firstVisibleItemScrollOffset / (headerSize * 0.5f).coerceAtLeast(1f)).coerceIn(0f, 1f)
+          }
+        (1f - progress / 0.5f).coerceIn(0f, 1f)
+      }
+    }
+  val chromeOffsetThreshold = with(LocalDensity.current) { 8.dp.toPx() }
+  val chromeShown by
+    remember(listState, chromeOffsetThreshold) {
+      derivedStateOf {
+        listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > chromeOffsetThreshold
+      }
+    }
+  val chromeAlpha by
+    animateFloatAsState(
+      targetValue = if (chromeShown) 1f else 0f,
+      animationSpec = spring(dampingRatio = 1f, stiffness = Spring.StiffnessMediumLow),
+      label = "settingsTopChrome",
+    )
+  val topTitleAlpha by
+    animateFloatAsState(
+      targetValue = if (scrollProgress > 0.42f) 1f else 0f,
+      animationSpec = spring(dampingRatio = 1f, stiffness = Spring.StiffnessMediumLow),
+      label = "settingsTopTitle",
+    )
+
+  Box(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize().layerBackdrop(topBackdrop).background(ClawTheme.colors.canvas)) {
+      ClawScaffold(
+        containerColor = Color.Transparent,
+        contentPadding = PaddingValues(start = 16.dp, top = 0.dp, end = 16.dp, bottom = 4.dp),
+        contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom),
+      ) {
+        LazyColumn(
+          state = listState,
+          modifier = Modifier.fillMaxSize(),
+          verticalArrangement = Arrangement.spacedBy(14.dp),
+          contentPadding = PaddingValues(top = topBarHeight, bottom = 8.dp),
+        ) {
+          item {
+            Column(
+              modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+              verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+              Text(
+                text = nativeString("Settings"),
+                style = ClawTheme.type.display.copy(fontSize = 30.sp, lineHeight = 36.sp, fontWeight = FontWeight.SemiBold),
+                color = ClawTheme.colors.text,
+                modifier = Modifier.graphicsLayer { alpha = bigTitleAlphaState.value },
+              )
+              SettingsSearchPill(onClick = onOpenCommand)
+            }
+          }
 
       item {
-        ProfilePanel(displayName = displayName.ifBlank { "OpenClaw" }, onClick = { onRouteChange(SettingsRoute.Profile) })
+        ProfilePanel(
+          profile = gatewayProfile,
+          loadAvatar = { viewModel.loadGatewayProfileAvatar() },
+          onClick = { onRouteChange(SettingsRoute.Profile) },
+          onAbout = { onRouteChange(SettingsRoute.About) },
+        )
       }
+
+      // Right-hand text is a status, never an explanation: at most ~3 glyphs.
+      // Descriptive subtitles ("设置、状态和修复", "版本和更新") stay hidden.
+      val gatewayShort =
+        when {
+          gatewayConnectionDisplay.isConnected -> "已连接"
+          gatewayConnectionDisplay.statusText.contains("onnect", true) -> "连接中"
+          gatewayConnectionDisplay.statusText.contains("air", true) -> "配对中"
+          gatewayConnectionDisplay.statusText.contains("uth", true) -> "需认证"
+          else -> "未连接"
+        }
+      val nodesShort =
+        when {
+          nodesDevicesSummary.pendingDevices.isNotEmpty() -> "待配对"
+          nodesDevicesSummary.nodes.isNotEmpty() -> "${nodesDevicesSummary.nodes.count { it.connected }}/${nodesDevicesSummary.nodes.size}"
+          nodesDevicesSummary.pairedDevices.isNotEmpty() -> "${nodesDevicesSummary.pairedDevices.size} 台"
+          else -> "无"
+        }
+      val channelsShort =
+        when {
+          channelsState.errorText != null -> "异常"
+          channelsSummary == null -> "—"
+          channelsSummary.channels.isEmpty() -> "无"
+          else -> "${channelsSummary.channels.count { it.connected || it.running }}/${channelsSummary.channels.size}"
+        }
+      val skillsShort =
+        when {
+          skillsState.errorText != null -> "异常"
+          skillsSummary == null -> "—"
+          skillsSummary.skills.isEmpty() -> "无"
+          else -> {
+            val ready =
+              skillsSummary.skills.count {
+                !it.disabled && it.eligible && !it.blockedByAllowlist && !it.blockedByAgentFilter && it.missingCount == 0
+              }
+            when {
+              ready == skillsSummary.skills.size -> "就绪"
+              ready > 0 -> "部分"
+              else -> "异常"
+            }
+          }
+        }
+      val workshopPending = skillWorkshopSummary.proposals.count { it.status == "pending" }
+      val workshopShort =
+        when {
+          workshopPending > 0 -> "$workshopPending 项"
+          skillWorkshopSummary.proposals.any { it.status == "quarantined" || it.status == "stale" } -> "保留"
+          skillWorkshopSummary.proposals.any { it.status == "applied" } -> "已应用"
+          skillWorkshopSummary.proposals.isEmpty() -> "无"
+          else -> "${skillWorkshopSummary.proposals.size} 项"
+        }
+      val usageShort =
+        when {
+          usageState.errorText != null -> "异常"
+          usageSummary == null -> "—"
+          usageSummary.providers.isEmpty() -> "无数据"
+          else -> "${usageSummary.providers.size} 家"
+        }
 
       val settingsRows =
         listOf(
           SettingsRow(
             SettingsRoute.Gateway,
-            verbatimText(gatewaySummary(gatewayConnectionDisplay)),
+            verbatimText(gatewayShort),
             status = gatewayConnectionDisplay.isConnected,
           ),
-          SettingsRow(SettingsRoute.NodesDevices, verbatimText(nodesDevicesSummaryText(nodesDevicesSummary)), status = nodesDevicesStatus(nodesDevicesSummary)),
-          SettingsRow(SettingsRoute.Channels, channelsState.summaryText(::channelsSummaryText), status = if (channelsState.errorText != null) false else channelsSummary?.let(::channelsStatus)),
-          SettingsRow(SettingsRoute.Agents, if (agents.isEmpty()) nativeText("Load from gateway") else nativeText("\${agents.size} available", agents.size), status = agents.isNotEmpty()),
+          SettingsRow(SettingsRoute.NodesDevices, verbatimText(nodesShort), status = nodesDevicesStatus(nodesDevicesSummary)),
+          SettingsRow(SettingsRoute.Channels, verbatimText(channelsShort), status = if (channelsState.errorText != null) false else channelsSummary?.let(::channelsStatus)),
+          SettingsRow(SettingsRoute.Agents, verbatimText(if (agents.isEmpty()) "无" else "${agents.size} 个"), status = agents.isNotEmpty()),
           SettingsRow(
             SettingsRoute.SystemAgent,
-            nativeText("Setup, status, and repair"),
+            verbatimText(""),
             status =
               when (systemAgentChatState.access) {
                 SystemAgentChatAccess.Ready -> true
@@ -1710,11 +1876,13 @@ private fun SettingsHomeScreen(
           ),
           SettingsRow(
             SettingsRoute.ProvidersModels,
-            when {
-              readyProviderCount > 0 -> nativeText("\$readyProviderCount ready", readyProviderCount)
-              unknownProviderCount > 0 -> nativeText("Availability unknown")
-              else -> nativeText("Review readiness")
-            },
+            verbatimText(
+              when {
+                readyProviderCount > 0 -> "就绪"
+                unknownProviderCount > 0 -> "未知"
+                else -> "检查"
+              },
+            ),
             status =
               when {
                 !isConnected -> false
@@ -1723,35 +1891,57 @@ private fun SettingsHomeScreen(
                 else -> false
               },
           ),
-          SettingsRow(SettingsRoute.Approvals, verbatimText(approvalsSummary(pendingApprovalsCount)), status = approvalsStatus(pendingApprovalsCount)),
-          SettingsRow(SettingsRoute.CronJobs, verbatimText(cronJobsSummary(cronStatus.jobs)), status = if (cronStatus.jobs > 0) cronStatus.enabled else null),
-          SettingsRow(SettingsRoute.Usage, usageState.summaryText { usageSummaryText(it.providers.size) }, status = if (usageState.errorText != null) false else true.takeIf { usageSummary?.providers?.isNotEmpty() == true }),
-          SettingsRow(SettingsRoute.Skills, skillsState.summaryText { skillsSummaryText(it.skills) }, status = if (skillsState.errorText != null) false else skillsSummary?.skills?.let(::skillsStatus)),
+          SettingsRow(
+            SettingsRoute.Approvals,
+            verbatimText(if (pendingApprovalsCount == 0) "无" else "$pendingApprovalsCount 项"),
+            status = approvalsStatus(pendingApprovalsCount),
+          ),
+          SettingsRow(
+            SettingsRoute.CronJobs,
+            verbatimText(
+              when {
+                cronStatus.jobs == 0 -> "无"
+                !cronStatus.enabled -> "关闭"
+                else -> "${cronStatus.jobs} 项"
+              },
+            ),
+            status = if (cronStatus.jobs > 0) cronStatus.enabled else null,
+          ),
+          SettingsRow(SettingsRoute.Usage, verbatimText(usageShort), status = if (usageState.errorText != null) false else true.takeIf { usageSummary?.providers?.isNotEmpty() == true }),
+          SettingsRow(SettingsRoute.Share, verbatimText("")),
+          SettingsRow(SettingsRoute.Skills, verbatimText(skillsShort), status = if (skillsState.errorText != null) false else skillsSummary?.skills?.let(::skillsStatus)),
           SettingsRow(
             SettingsRoute.SkillWorkshop,
-            verbatimText(skillWorkshopSummaryText(skillWorkshopSummary)),
+            verbatimText(workshopShort),
             status = skillWorkshopStatus(skillWorkshopSummary),
           ),
-          SettingsRow(SettingsRoute.Dreaming, dreamingState.summaryText(::dreamingSummaryText), status = if (dreamingState.errorText != null) false else dreamingSummary?.let(::dreamingStatus)),
-          SettingsRow(SettingsRoute.Terminal, nativeText("Shell in the agent workspace"), status = isConnected),
-          SettingsRow(SettingsRoute.Desktop, nativeText("View a machine screen"), status = isConnected),
-          SettingsRow(SettingsRoute.Voice, if (speakerEnabled) nativeText("Speaker on") else nativeText("Speaker muted")),
-          SettingsRow(SettingsRoute.Notifications, if (notificationForwardingEnabled) nativeText("Smart delivery") else nativeText("Off")),
-          SettingsRow(SettingsRoute.PhoneCapabilities, if (cameraEnabled) nativeText("Camera enabled") else nativeText("Locked"), status = !cameraEnabled),
+          SettingsRow(
+            SettingsRoute.Dreaming,
+            verbatimText(
+              when {
+                dreamingSummary == null -> "—"
+                !dreamingSummary.storeHealthy || !dreamingSummary.phaseSignalHealthy -> "注意"
+                dreamingSummary.enabled -> "等待"
+                else -> "关闭"
+              },
+            ),
+            status = if (dreamingState.errorText != null) false else dreamingSummary?.let(::dreamingStatus),
+          ),
+          SettingsRow(SettingsRoute.Terminal, verbatimText(""), status = isConnected),
+          SettingsRow(SettingsRoute.Desktop, verbatimText(""), status = isConnected),
+          SettingsRow(SettingsRoute.Voice, verbatimText(if (speakerEnabled) "开启" else "静音")),
+          SettingsRow(SettingsRoute.Notifications, verbatimText(if (notificationForwardingEnabled) "智能" else "关闭")),
+          SettingsRow(SettingsRoute.PhoneCapabilities, verbatimText(if (cameraEnabled) "启用" else "锁定"), status = !cameraEnabled),
           SettingsRow(
             SettingsRoute.Appearance,
-            joinedNativeText(
-              separator = " · ",
-              parts = listOf(verbatimText(appearanceThemeSummary(appearanceThemeMode)), verbatimText(appLanguage.displayName)),
-            ),
+            verbatimText(appearanceThemeSummary(appearanceThemeMode)),
           ),
-          SettingsRow(SettingsRoute.About, nativeText("Version and update")),
           SettingsRow(
             SettingsRoute.AppUpdate,
-            if (pendingAppUpdate != null) verbatimText("有新版本") else verbatimText("检查新版本"),
+            verbatimText(if (pendingAppUpdate != null) "新版本" else ""),
             status = if (pendingAppUpdate != null) true else null,
           ),
-          SettingsRow(SettingsRoute.Health, nativeText("Diagnostics"), status = isConnected),
+          SettingsRow(SettingsRoute.Health, verbatimText(""), status = isConnected),
         ).filter { it.route.isAvailable(desktopObserveAvailable) }
 
       settingsSections(settingsRows).forEach { section ->
@@ -1767,11 +1957,12 @@ private fun SettingsHomeScreen(
         SettingsSectionTitle(nativeText("Account"))
       }
       item {
-        ClawPanel(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+        SettingsHomeCard {
           SettingsListRow(
             title = nativeText("Sign Out"),
-            value = nativeText("Return to setup"),
+            value = nativeText(""),
             icon = Icons.AutoMirrored.Filled.ExitToApp,
+            tint = SettingsTileGrey,
             opensRoute = false,
             onClick = viewModel::pairNewGateway,
           )
@@ -1795,6 +1986,41 @@ private fun SettingsHomeScreen(
           style = ClawTheme.type.caption.copy(fontSize = 12.5.sp, lineHeight = 16.sp),
           color = ClawTheme.colors.textMuted,
           textAlign = TextAlign.Center,
+        )
+      }
+        }
+      }
+    }
+    Box(
+      modifier = Modifier.fillMaxWidth().height(topBarHeight).clawBackdropTopBar(topBackdrop),
+    ) {
+      if (showSidebarButton) {
+        SettingsTopBarMenuButton(
+          chromeAlpha = chromeAlpha,
+          backdrop = topBackdrop,
+          onClick = onOpenSidebar,
+          modifier =
+            Modifier
+              .align(Alignment.TopStart)
+              .padding(top = statusBarHeight + ClawTopBarButtonTopInset, start = 16.dp)
+              .testTag("sidebar-open-settings"),
+        )
+      }
+      Box(
+        modifier = Modifier.align(Alignment.TopCenter).padding(top = statusBarHeight).height(ClawTopBarContentHeight).fillMaxWidth(),
+        contentAlignment = Alignment.Center,
+      ) {
+        Text(
+          text = nativeString("Settings"),
+          style = ClawTheme.type.title.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium),
+          color = ClawTheme.colors.text,
+          modifier =
+            Modifier.graphicsLayer {
+              alpha = topTitleAlpha
+              translationY = (1f - topTitleAlpha) * 8.dp.toPx()
+            },
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
         )
       }
     }
@@ -1967,53 +2193,133 @@ private fun SettingsSectionTitle(title: NativeText) {
   val localizedTitle = title.resolveNativeTextResource()
   Text(
     text = localizedUppercase(localizedTitle, currentAppLanguage().languageTag),
-    style = ClawTheme.type.caption.copy(fontSize = 12.sp, lineHeight = 16.sp),
+    style = ClawTheme.type.caption.copy(fontSize = 13.sp, lineHeight = 17.sp),
     color = ClawTheme.colors.textMuted,
+    modifier = Modifier.padding(start = 6.dp),
   )
+}
+
+/** HyperOS-style search entry: a quiet grey pill that opens the command palette. */
+@Composable
+private fun SettingsSearchPill(onClick: () -> Unit) {
+  Row(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .height(46.dp)
+        .clip(RoundedCornerShape(23.dp))
+        .background(ClawTheme.colors.surfacePressed)
+        .clickable(role = Role.Button, onClick = onClick)
+        .padding(horizontal = 14.dp),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    Icon(
+      imageVector = Icons.Default.Search,
+      contentDescription = null,
+      modifier = Modifier.size(20.dp),
+      tint = ClawTheme.colors.textMuted,
+    )
+    Text(
+      text = nativeString("Search settings"),
+      style = ClawTheme.type.body.copy(fontSize = 15.sp),
+      color = ClawTheme.colors.textMuted,
+    )
+  }
+}
+
+/** Borderless 24dp card used by the Settings landing page only. */
+@Composable
+private fun SettingsHomeCard(
+  modifier: Modifier = Modifier,
+  contentPadding: PaddingValues = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
+  content: @Composable ColumnScope.() -> Unit,
+) {
+  Surface(
+    modifier = modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(24.dp),
+    color = ClawTheme.colors.surface,
+  ) {
+    Column(modifier = Modifier.padding(contentPadding), content = content)
+  }
+}
+
+/** 42dp glass disc that stays on top of the blur bar; chrome fades in on scroll. */
+@Composable
+private fun SettingsTopBarMenuButton(
+  chromeAlpha: Float,
+  backdrop: Backdrop,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  ClawGlassTopBarButton(
+    contentDescription = nativeString("Show Sidebar"),
+    chromeAlpha = chromeAlpha,
+    backdrop = backdrop,
+    onClick = onClick,
+    modifier = modifier,
+  ) {
+    Icon(
+      imageVector = Icons.Default.Menu,
+      contentDescription = null,
+      modifier = Modifier.size(22.dp),
+      tint = ClawTheme.colors.text,
+    )
+  }
 }
 
 @Composable
 private fun ProfilePanel(
-  displayName: String,
+  profile: GatewayProfile?,
+  loadAvatar: suspend () -> GatewayProfileAvatarImage?,
   onClick: () -> Unit,
+  onAbout: () -> Unit,
 ) {
-  ClawPanel(contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
+  val displayName = profile?.displayName?.trim()?.takeIf(String::isNotEmpty) ?: "OpenClaw"
+  SettingsHomeCard {
     Row(
       modifier =
         Modifier
           .fillMaxWidth()
-          .clip(RoundedCornerShape(ClawTheme.radii.row))
-          .clickable(onClick = onClick),
+          .clip(RoundedCornerShape(18.dp))
+          .clickable(onClick = onClick)
+          .padding(horizontal = 12.dp, vertical = 10.dp),
       verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-      Surface(
-        modifier = Modifier.size(32.dp),
-        shape = CircleShape,
-        color = ClawTheme.colors.surfacePressed,
-        border = BorderStroke(1.dp, ClawTheme.colors.borderStrong),
-      ) {
-        Box(contentAlignment = Alignment.Center) {
-          Text(
-            text =
-              localizedInitial(displayName, currentAppLanguage().languageTag) ?: "O",
-            style = ClawTheme.type.title.copy(fontSize = 14.sp, lineHeight = 17.sp),
-            color = ClawTheme.colors.text,
-            textAlign = TextAlign.Center,
-          )
-        }
+      // The avatar is wider than the 36dp leading tile used by rows below, but
+      // it must share the same centre line so the About tile lines up under it.
+      Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+        GatewayProfileAvatar(
+          profile = profile,
+          size = 44.dp,
+          loadAvatar = loadAvatar,
+        )
       }
-      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(text = displayName, style = ClawTheme.type.section, color = ClawTheme.colors.text, maxLines = 1)
-        Text(text = nativeString("OpenClaw mobile"), style = ClawTheme.type.caption.copy(fontSize = 12.5.sp, lineHeight = 16.sp), color = ClawTheme.colors.textMuted, maxLines = 1)
-      }
+      Text(
+        text = displayName,
+        modifier = Modifier.weight(1f),
+        style = ClawTheme.type.body.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium),
+        color = ClawTheme.colors.text,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
       Icon(
         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
         contentDescription = nativeString("Open profile"),
-        modifier = Modifier.size(15.dp),
-        tint = ClawTheme.colors.text,
+        modifier = Modifier.size(16.dp),
+        tint = ClawTheme.colors.textSubtle,
       )
     }
+    // About lives under the account row in this top card (HyperOS device card
+    // pattern) instead of repeating down in the profile/device group.
+    SettingsListRow(
+      title = nativeText("About"),
+      value = nativeText(""),
+      icon = Icons.Default.Info,
+      tint = SettingsTileGrey,
+      onClick = onAbout,
+    )
   }
 }
 
@@ -2022,12 +2328,13 @@ private fun SettingsGroup(
   rows: List<SettingsRow>,
   onOpen: (SettingsRoute) -> Unit,
 ) {
-  ClawPanel(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
-    ClawSeparatedColumn(items = rows) { row ->
+  SettingsHomeCard {
+    rows.forEach { row ->
       SettingsListRow(
         title = row.route.title,
         value = row.value,
         icon = row.route.icon,
+        tint = settingsRouteTint(row.route),
         status = row.status,
         onClick = { onOpen(row.route) },
       )
@@ -2040,33 +2347,116 @@ private fun SettingsListRow(
   title: NativeText,
   value: NativeText,
   icon: ImageVector,
+  tint: Color,
   status: Boolean? = null,
   opensRoute: Boolean = true,
   onClick: () -> Unit,
 ) {
   val localizedTitle = title.resolveNativeTextResource()
-  ClawListItem(
-    title = localizedTitle,
-    subtitle = value.resolveNativeTextResource().takeIf { it.isNotBlank() },
-    leading = {
-      Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(20.dp), tint = ClawTheme.colors.text)
-    },
-    trailing = {
-      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        status?.let { active ->
-          Box(modifier = Modifier.size(4.5.dp).clip(CircleShape).background(if (active) ClawTheme.colors.success else ClawTheme.colors.textSubtle))
-        }
-        Icon(
-          imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-          contentDescription = settingsRowDisclosureDescription(localizedTitle, opensRoute = opensRoute),
-          modifier = Modifier.size(17.dp),
-          tint = ClawTheme.colors.text,
-        )
-      }
-    },
-    onClick = onClick,
-  )
+  val trailingValue = value.resolveNativeTextResource().takeIf { it.isNotBlank() }
+  Row(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .clip(RoundedCornerShape(18.dp))
+        .clickable(onClick = onClick)
+        .padding(horizontal = 12.dp, vertical = 12.dp),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(12.dp),
+  ) {
+    Box(
+      modifier =
+        Modifier
+          .size(36.dp)
+          .clip(RoundedCornerShape(11.dp))
+          .background(tint),
+      contentAlignment = Alignment.Center,
+    ) {
+      Icon(
+        imageVector = icon,
+        contentDescription = null,
+        modifier = Modifier.size(19.dp),
+        tint = Color.White,
+      )
+    }
+    Text(
+      text = localizedTitle,
+      style = ClawTheme.type.body.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium),
+      color = ClawTheme.colors.text,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+      modifier = Modifier.weight(1f),
+    )
+    status?.let { active ->
+      Box(
+        modifier =
+          Modifier
+            .size(5.dp)
+            .clip(CircleShape)
+            .background(if (active) ClawTheme.colors.success else ClawTheme.colors.textSubtle),
+      )
+    }
+    trailingValue?.let {
+      Text(
+        text = it,
+        style = ClawTheme.type.body.copy(fontSize = 14.sp),
+        color = ClawTheme.colors.textMuted,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.widthIn(max = 150.dp),
+      )
+    }
+    Icon(
+      imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+      contentDescription = settingsRowDisclosureDescription(localizedTitle, opensRoute = opensRoute),
+      modifier = Modifier.size(16.dp),
+      tint = ClawTheme.colors.textSubtle,
+    )
+  }
 }
+
+/**
+ * HyperOS settings only uses five verified tile colours:
+ * blue #2C84FA (connections/security), green #19CE38 (network/battery/health),
+ * red #F83728 (notifications/sound), purple #7663FD (personalization/AI),
+ * yellow #F9BE06 (display/automation), plus neutral grey. Keep the home inside
+ * that palette instead of inventing a hue per route.
+ */
+private val SettingsTileBlue = Color(0xFF2C84FA)
+private val SettingsTileGreen = Color(0xFF19CE38)
+private val SettingsTileRed = Color(0xFFF83728)
+private val SettingsTilePurple = Color(0xFF7663FD)
+private val SettingsTileYellow = Color(0xFFF9BE06)
+private val SettingsTileGrey = Color(0xFF8E8E93)
+
+private fun settingsRouteTint(route: SettingsRoute): Color =
+  when (route) {
+    SettingsRoute.Gateway,
+    SettingsRoute.NodesDevices,
+    SettingsRoute.Desktop,
+    SettingsRoute.PhoneCapabilities,
+    SettingsRoute.Share,
+    -> SettingsTileBlue
+    SettingsRoute.Channels,
+    SettingsRoute.Notifications,
+    SettingsRoute.Voice,
+    SettingsRoute.Approvals,
+    -> SettingsTileRed
+    SettingsRoute.Agents,
+    SettingsRoute.SystemAgent,
+    SettingsRoute.Dreaming,
+    SettingsRoute.Appearance,
+    -> SettingsTilePurple
+    SettingsRoute.ProvidersModels,
+    SettingsRoute.Usage,
+    SettingsRoute.Skills,
+    SettingsRoute.SkillWorkshop,
+    SettingsRoute.AppUpdate,
+    SettingsRoute.Health,
+    -> SettingsTileGreen
+    SettingsRoute.CronJobs -> SettingsTileYellow
+    else -> SettingsTileGrey
+  }
 
 internal fun settingsRowDisclosureDescription(
   localizedTitle: String,

@@ -32,7 +32,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -96,7 +95,7 @@ private fun ToolRowIcon(
       tint = tint,
     )
   } else {
-    LucideToolIcon(kind = detail.kind, tint = tint, size = size, running = detail.running)
+    LucideToolIcon(kind = detail.kind, tint = tint, size = size)
   }
 }
 
@@ -165,22 +164,16 @@ internal fun ToolActivityRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
       ) {
-        ToolRowIcon(detail = detail, tint = rowColor, size = 16.dp)
-        Text(
+        ToolRowIcon(detail = detail, tint = rowColor, size = 20.dp)
+        // Icons are static; a running row is signalled by the label's text
+        // sweep instead of by animating the glyph.
+        ShimmeringLabel(
           text = detail.title,
           style = ClawTheme.type.caption,
           color = rowColor,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
+          shimmering = detail.running,
           modifier = Modifier.weight(1f, fill = false),
         )
-        if (detail.running) {
-          Text(
-            text = "…",
-            style = ClawTheme.type.caption,
-            color = colors.textSubtle,
-          )
-        }
         Icon(
           imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
           contentDescription = null,
@@ -219,7 +212,7 @@ internal fun ToolDetailSheet(
         ToolRowIcon(
           detail = detail,
           tint = if (detail.isError) colors.danger else colors.accent,
-          size = 18.dp,
+          size = 20.dp,
         )
         Spacer(Modifier.width(8.dp))
         Text(

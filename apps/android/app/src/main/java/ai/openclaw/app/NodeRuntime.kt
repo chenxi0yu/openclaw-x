@@ -2,6 +2,7 @@ package ai.openclaw.app
 
 import ai.openclaw.app.chat.AndroidClientDatabases
 import ai.openclaw.app.chat.BackgroundTask
+import ai.openclaw.app.chat.CachedImage
 import ai.openclaw.app.chat.ChatActiveRunPresentation
 import ai.openclaw.app.chat.ChatAgentSessionSelectionOwner
 import ai.openclaw.app.chat.ChatCacheScope
@@ -178,10 +179,12 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -1335,6 +1338,10 @@ class NodeRuntime private constructor(
   val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
   private val _gatewayControlPage = MutableStateFlow<GatewayControlPage?>(null)
   val gatewayControlPage: StateFlow<GatewayControlPage?> = _gatewayControlPage.asStateFlow()
+  private val _gatewayProfile = MutableStateFlow<GatewayProfileState>(GatewayProfileState.Loading)
+  internal val gatewayProfile: StateFlow<GatewayProfileState> = _gatewayProfile.asStateFlow()
+  private val gatewayProfileRefreshMutex = Mutex()
+  private val profileAvatarRefreshMutex = Mutex()
   private val _desktopObserveAvailable = MutableStateFlow(false)
   val desktopObserveAvailable: StateFlow<Boolean> = _desktopObserveAvailable.asStateFlow()
   private val _nodeConnected = MutableStateFlow(false)
@@ -2140,6 +2147,8 @@ class NodeRuntime private constructor(
           cacheScope = ::chatCacheScope,
           currentDefaultAgentId = { gatewayDefaultAgentId.value },
           currentDefaultAgentRevision = gatewayDefaultAgentRevision::get,
+          loadCachedPinnedSessionKeys = prefs::cachedPinnedSessionKeys,
+          storeCachedPinnedSessionKeys = prefs::storePinnedSessionKeys,
           gatewayAdvertisesMethod = ::gatewayAdvertisesMethod,
           gatewayAdvertisesCapability = ::gatewayAdvertisesCapability,
           currentGatewayCatalogRevision = { gatewayMethodsEpoch.value },
@@ -3722,10 +3731,6 @@ class NodeRuntime private constructor(
     val permissions = connectionManager.buildPermissions()
     if (permissions == lastNodePermissions) return
     refreshNodeSurfaceAfterSettingsChange()
-  }
-
-  fun setDisplayName(value: String) {
-    prefs.setDisplayName(value)
   }
 
   fun setCameraEnabled(value: Boolean) {
@@ -5448,6 +5453,318 @@ class NodeRuntime private constructor(
   }
 
   internal suspend fun loadChatImageArtifact(artifactId: String) = chat.loadImageArtifact(artifactId)
+
+  private sealed interface GatewayProfileFetch {
+    data class Success(val profile: GatewayProfile) : GatewayProfileFetch
+
+    data object Unsupported : GatewayProfileFetch
+
+    data object Forbidden : GatewayProfileFetch
+
+    data object Disconnected : GatewayProfileFetch
+
+    data class Failed(val message: String?) : GatewayProfileFetch
+  }
+
+  /** Loads the durable Gateway person profile, using a bounded local cache between refreshes. */
+  internal suspend fun refreshGatewayProfile(forceRefresh: Boolean = false): GatewayProfileRefreshResult =
+    gatewayProfileRefreshMutex.withLock {
+      val gatewayId =
+        currentGatewayProfileGatewayId()
+          ?: run {
+            _gatewayProfile.value = GatewayProfileState.Disconnected
+            return@withLock GatewayProfileRefreshResult.Disconnected
+          }
+      val cached = prefs.loadCachedGatewayProfile(gatewayId)
+      val current = (_gatewayProfile.value as? GatewayProfileState.Ready)?.profile
+      if (cached != null) {
+        if (current?.gatewayId != gatewayId) {
+          _gatewayProfile.value = GatewayProfileState.Ready(cached.toGatewayProfile())
+        }
+      } else if (current?.gatewayId != gatewayId) {
+        _gatewayProfile.value = GatewayProfileState.Loading
+      }
+      val scope = captureGatewayDataScope()
+      if (scope == null) {
+        if (cached == null) _gatewayProfile.value = GatewayProfileState.Disconnected
+        return@withLock GatewayProfileRefreshResult.Disconnected
+      }
+      val cacheAge = System.currentTimeMillis() - (cached?.fetchedAtMs ?: Long.MIN_VALUE)
+      if (!forceRefresh && cached != null && cacheAge in 0..GATEWAY_PROFILE_REFRESH_TTL_MS) {
+        return@withLock GatewayProfileRefreshResult.Success
+      }
+      when (val fetched = fetchGatewayProfile(scope)) {
+        is GatewayProfileFetch.Success -> {
+          prefs.saveCachedGatewayProfile(fetched.profile.toCachedProfile(System.currentTimeMillis()))
+          publishGatewayProfileIfCurrent(fetched.profile)
+          if (forceRefresh && fetched.profile.hasAvatar) {
+            loadGatewayProfileAvatar(forceRefresh = true)
+          }
+          GatewayProfileRefreshResult.Success
+        }
+
+        GatewayProfileFetch.Unsupported -> {
+          if (cached == null) _gatewayProfile.value = GatewayProfileState.Unsupported
+          GatewayProfileRefreshResult.Unsupported
+        }
+
+        GatewayProfileFetch.Forbidden -> {
+          if (cached == null) _gatewayProfile.value = GatewayProfileState.Failed("当前连接没有查看个人资料的权限")
+          GatewayProfileRefreshResult.Forbidden
+        }
+
+        GatewayProfileFetch.Disconnected -> {
+          if (cached == null) _gatewayProfile.value = GatewayProfileState.Disconnected
+          GatewayProfileRefreshResult.Disconnected
+        }
+
+        is GatewayProfileFetch.Failed -> {
+          if (cached == null) _gatewayProfile.value = GatewayProfileState.Failed(fetched.message)
+          GatewayProfileRefreshResult.Failed(fetched.message)
+        }
+      }
+    }
+
+  /** Reads the profile avatar through the disposable image cache, fetching only when needed. */
+  internal suspend fun loadGatewayProfileAvatar(forceRefresh: Boolean = false): GatewayProfileAvatarImage? =
+    profileAvatarRefreshMutex.withLock {
+      val profile = (_gatewayProfile.value as? GatewayProfileState.Ready)?.profile ?: return@withLock null
+      if (!profile.hasAvatar) return@withLock null
+      val gatewayId = profile.gatewayId
+      val source = profile.avatarCacheSource
+
+      suspend fun cachedAvatar(): GatewayProfileAvatarImage? =
+        runCatching { chatTranscriptCache.loadImage(gatewayId, source) }.getOrNull()?.let { cached ->
+          GatewayProfileAvatarImage(bytes = cached.bytes, mimeType = cached.mimeType.takeIf(String::isNotBlank))
+        }
+
+      if (!forceRefresh) cachedAvatar()?.let { return@withLock it }
+      val page = _gatewayControlPage.value ?: return@withLock cachedAvatar()
+      when (val fetched = fetchGatewayProfileAvatar(page, profile.id, profile.updatedAtMs)) {
+        is GatewayProfileAvatarFetchResult.Success -> {
+          runCatching {
+            chatTranscriptCache.saveImage(
+              gatewayId,
+              source,
+              CachedImage(bytes = fetched.image.bytes, mimeType = fetched.image.mimeType.orEmpty()),
+            )
+          }
+          fetched.image
+        }
+
+        GatewayProfileAvatarFetchResult.NotFound -> null
+
+        is GatewayProfileAvatarFetchResult.Failure -> cachedAvatar()
+      }
+    }
+
+  internal suspend fun setGatewayProfileDisplayName(displayName: String?): GatewayProfileWriteResult {
+    val profile = (_gatewayProfile.value as? GatewayProfileState.Ready)?.profile
+      ?: return GatewayProfileWriteResult.Failed(null)
+    if (!profile.canEdit && !operatorScopesAllowAdmin(_operatorScopes.value)) {
+      return GatewayProfileWriteResult.Forbidden
+    }
+    val scope = captureGatewayDataScope() ?: return GatewayProfileWriteResult.Disconnected
+    val normalizedName = validGatewayProfileDisplayName(displayName)
+    val params =
+      buildJsonObject {
+        put("profileId", JsonPrimitive(profile.id))
+        put("displayName", normalizedName?.let(::JsonPrimitive) ?: JsonNull)
+      }
+    return try {
+      val raw = requestGatewayData(scope, GatewayMethod.UsersSetDisplayName.rawValue, params.toString())
+      val updated = parseGatewaySelfProfile(json, raw, scope.stableId)
+        ?: return GatewayProfileWriteResult.Failed(null)
+      val merged = updated.copy(avatarRevision = profile.avatarRevision, canEdit = true)
+      prefs.saveCachedGatewayProfile(merged.toCachedProfile(System.currentTimeMillis()))
+      publishGatewayProfileIfCurrent(merged)
+      GatewayProfileWriteResult.Success
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (error: Throwable) {
+      classifyGatewayProfileWriteError(error, GatewayMethod.UsersSetDisplayName.rawValue)
+    }
+  }
+
+  internal suspend fun setGatewayProfileAvatar(upload: GatewayProfileAvatarUpload): GatewayProfileWriteResult {
+    val profile = (_gatewayProfile.value as? GatewayProfileState.Ready)?.profile
+      ?: return GatewayProfileWriteResult.Failed(null)
+    if (!profile.canEdit && !operatorScopesAllowAdmin(_operatorScopes.value)) {
+      return GatewayProfileWriteResult.Forbidden
+    }
+    val scope = captureGatewayDataScope() ?: return GatewayProfileWriteResult.Disconnected
+    val params =
+      buildJsonObject {
+        put("profileId", JsonPrimitive(profile.id))
+        put("mime", JsonPrimitive(upload.mimeType))
+        put("avatarBase64", JsonPrimitive(upload.base64))
+      }
+    return try {
+      val raw = requestGatewayData(scope, GatewayMethod.UsersSetAvatar.rawValue, params.toString())
+      val updated = parseGatewaySelfProfile(json, raw, scope.stableId)
+        ?: return GatewayProfileWriteResult.Failed(null)
+      val revision =
+        runCatching {
+          json.parseToJsonElement(raw).jsonObject["avatarRevision"].asStringOrNull()?.trim()?.takeIf(String::isNotEmpty)
+        }.getOrNull()
+      val merged =
+        updated.copy(
+          hasAvatar = true,
+          avatarRevision = revision ?: profile.avatarRevision,
+          canEdit = true,
+        )
+      prefs.saveCachedGatewayProfile(merged.toCachedProfile(System.currentTimeMillis()))
+      runCatching {
+        chatTranscriptCache.saveImage(
+          scope.stableId,
+          merged.avatarCacheSource,
+          CachedImage(bytes = upload.bytes, mimeType = upload.mimeType),
+        )
+      }
+      publishGatewayProfileIfCurrent(merged)
+      GatewayProfileWriteResult.Success
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (error: Throwable) {
+      classifyGatewayProfileWriteError(error, GatewayMethod.UsersSetAvatar.rawValue)
+    }
+  }
+
+  private fun currentGatewayProfileGatewayId(): String? =
+    synchronized(gatewayDataScopeLock) { connectedEndpoint?.stableId }
+      ?: prefs.gatewayRegistry.activeStableId.value
+
+  private fun publishGatewayProfileIfCurrent(profile: GatewayProfile) {
+    if (currentGatewayProfileGatewayId() == profile.gatewayId) {
+      _gatewayProfile.value = GatewayProfileState.Ready(profile)
+    }
+  }
+
+  private suspend fun fetchGatewayProfile(scope: GatewayDataScope): GatewayProfileFetch {
+    var unsupported = false
+    var forbidden = false
+    var lastFailure: String? = null
+    if (gatewayAdvertisesMethod(GatewayMethod.UsersSelf.rawValue) != false) {
+      try {
+        val raw = requestGatewayData(scope, GatewayMethod.UsersSelf.rawValue, "{}")
+        parseGatewaySelfProfile(json, raw, scope.stableId)?.let { profile ->
+          return GatewayProfileFetch.Success(profile.copy(canEdit = true))
+        }
+      } catch (cancelled: CancellationException) {
+        throw cancelled
+      } catch (error: Throwable) {
+        when (val failure = classifyGatewayProfileFetchError(error, GatewayMethod.UsersSelf.rawValue)) {
+          GatewayProfileFetch.Unsupported -> unsupported = true
+          GatewayProfileFetch.Forbidden -> forbidden = true
+          GatewayProfileFetch.Disconnected -> return GatewayProfileFetch.Disconnected
+          is GatewayProfileFetch.Failed -> lastFailure = failure.message
+          is GatewayProfileFetch.Success -> Unit
+        }
+      }
+    }
+    if (gatewayAdvertisesMethod(GatewayMethod.UsersList.rawValue) == false) {
+      return when {
+        unsupported -> GatewayProfileFetch.Unsupported
+        forbidden -> GatewayProfileFetch.Forbidden
+        else -> GatewayProfileFetch.Failed(lastFailure)
+      }
+    }
+    return try {
+      val raw = requestGatewayData(scope, GatewayMethod.UsersList.rawValue, "{}")
+      val profiles = parseGatewayProfileList(json, raw, scope.stableId)
+      val profile =
+        selectGatewayProfile(profiles)
+          ?: return GatewayProfileFetch.Failed(
+            if (profiles.isEmpty()) "网关没有返回个人资料" else "网关上有多个用户资料，无法确定当前账号",
+          )
+      GatewayProfileFetch.Success(
+        profile.copy(canEdit = operatorScopesAllowAdmin(_operatorScopes.value)),
+      )
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (error: Throwable) {
+      classifyGatewayProfileFetchError(error, GatewayMethod.UsersList.rawValue)
+    }
+  }
+
+  private fun classifyGatewayProfileFetchError(
+    error: Throwable,
+    method: String,
+  ): GatewayProfileFetch =
+    when (error) {
+      is GatewayRequestRejected -> {
+        val code = error.gatewayError.code.trim().uppercase()
+        when {
+          error.isUnsupportedGatewayMethod(method) -> GatewayProfileFetch.Unsupported
+          code == "FORBIDDEN" || code == "UNAUTHORIZED" || code == "MISSING_SCOPE" -> GatewayProfileFetch.Forbidden
+          else -> GatewayProfileFetch.Failed(error.gatewayError.message.takeIf(String::isNotBlank))
+        }
+      }
+
+      is GatewayRequestNotEnqueued -> GatewayProfileFetch.Disconnected
+
+      else -> if (captureGatewayDataScope() == null) {
+        GatewayProfileFetch.Disconnected
+      } else {
+        GatewayProfileFetch.Failed(error.message?.takeIf(String::isNotBlank))
+      }
+    }
+
+  private fun classifyGatewayProfileWriteError(
+    error: Throwable,
+    method: String,
+  ): GatewayProfileWriteResult =
+    when (error) {
+      is GatewayRequestRejected -> {
+        val code = error.gatewayError.code.trim().uppercase()
+        when {
+          error.isUnsupportedGatewayMethod(method) -> GatewayProfileWriteResult.Unsupported
+          code == "FORBIDDEN" || code == "UNAUTHORIZED" || code == "MISSING_SCOPE" -> GatewayProfileWriteResult.Forbidden
+          else -> GatewayProfileWriteResult.Failed(error.gatewayError.message.takeIf(String::isNotBlank))
+        }
+      }
+
+      is GatewayRequestNotEnqueued -> GatewayProfileWriteResult.Disconnected
+
+      else -> if (captureGatewayDataScope() == null) {
+        GatewayProfileWriteResult.Disconnected
+      } else {
+        GatewayProfileWriteResult.Failed(error.message?.takeIf(String::isNotBlank))
+      }
+    }
+
+  /** Creates a gateway session share; fails closed when no gateway is connected. */
+  internal suspend fun createSessionShare(
+    sessionKey: String,
+    messageIds: List<String>,
+  ): SessionShareOutcome {
+    val page =
+      _gatewayControlPage.value
+        ?: return SessionShareOutcome.Failure(
+          SessionShareFailure(code = null, serverError = null, retryAfterSeconds = null, network = true),
+        )
+    return createSessionShareRequest(page = page, sessionKey = sessionKey, messageIds = messageIds)
+  }
+
+  /** Lists live share links; fails closed when no gateway is connected. */
+  internal suspend fun listSessionShares(): SessionShareListOutcome {
+    val page =
+      _gatewayControlPage.value
+        ?: return SessionShareListOutcome.Failure(
+          SessionShareFailure(code = null, serverError = null, retryAfterSeconds = null, network = true),
+        )
+    return listSessionSharesRequest(page = page)
+  }
+
+  /** Revokes one share link; fails closed when no gateway is connected. */
+  internal suspend fun deleteSessionShare(id: String): SessionShareDeleteOutcome {
+    val page =
+      _gatewayControlPage.value
+        ?: return SessionShareDeleteOutcome.Failure(
+          SessionShareFailure(code = null, serverError = null, retryAfterSeconds = null, network = true),
+        )
+    return deleteSessionShareRequest(page = page, id = id)
+  }
 
   internal suspend fun clearChatImageCache() = chatTranscriptCache.clearImages()
 
