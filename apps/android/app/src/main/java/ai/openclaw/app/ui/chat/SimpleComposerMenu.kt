@@ -336,21 +336,29 @@ internal fun SimpleComposerMenuOverlay(
       val panelBottom = panelTop + panelHeight
       val fallbackRowTop = panelTop + with(density) { 8.dp.toPx() }
       val rowTop = state.rowBounds[snapshot.kind]?.top ?: fallbackRowTop
-      // Starts exactly on the clicked row (so the title is continuous) and
-      // springs up to its new seat with the bounce above.
-      val top = rowTop - with(density) { 18.dp.toPx() } * titleTravel.value
-      val left = anchor.left + with(density) { 4.dp.toPx() } + with(density) { 6.dp.toPx() } * p
-      val maxHeight =
-        min(panelBottom - top, panelHeight.toFloat()).coerceAtLeast(0f)
       val headerPx =
         if (headerHeightPx > 0) headerHeightPx.toFloat() else with(density) { SimpleComposerMenuHeaderFallback.toPx() }
       val dividerPx = with(density) { SimpleComposerMenuDividerBlock.toPx() }
-      val maxListPx = (maxHeight - headerPx - dividerPx).coerceAtLeast(0f)
+      val minimumNestedHeight = headerPx + dividerPx
+      // Starts exactly on the clicked row (so the title is continuous) and
+      // springs up to its new seat with the bounce above. A row near the
+      // panel's bottom edge (or a panel caught mid-animation) can leave less
+      // room than the nested header needs; lift the card then instead of
+      // constructing an empty height range.
+      val top =
+        min(
+          rowTop - with(density) { 18.dp.toPx() } * titleTravel.value,
+          panelBottom - minimumNestedHeight,
+        )
+      val left = anchor.left + with(density) { 4.dp.toPx() } + with(density) { 6.dp.toPx() } * p
+      val maxHeight = min(panelBottom - top, panelHeight.toFloat()).coerceAtLeast(0f)
+      val maxListPx = (maxHeight - minimumNestedHeight).coerceAtLeast(0f)
+      val minNestedHeight = minOf(minimumNestedHeight, maxHeight)
       val targetHeight =
-        (headerPx + dividerPx + min(listHeightPx.toFloat(), maxListPx))
+        (minimumNestedHeight + min(listHeightPx.toFloat(), maxListPx))
           .coerceAtMost(maxHeight)
-          .coerceAtLeast(headerPx)
-      val height = (headerPx + (targetHeight - headerPx) * p).coerceIn(headerPx, maxHeight)
+          .coerceAtLeast(minNestedHeight)
+      val height = (headerPx + (targetHeight - headerPx) * p).coerceIn(minOf(headerPx, maxHeight), maxHeight)
 
       SimpleComposerMenuSecondaryCard(
         shown = snapshot,
