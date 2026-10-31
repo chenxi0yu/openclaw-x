@@ -152,6 +152,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.WindowInsets
@@ -487,11 +488,14 @@ internal fun ChatScreen(
   val liveTalkVisible by viewModel.chatLiveTalkVisible.collectAsState()
   val voiceInputVisible by viewModel.chatVoiceInputVisible.collectAsState()
   val composerBarStyle by viewModel.composerBarStyle.collectAsState()
-  // The floating simple bar rides the system gesture bar instead of a fixed band
-  // of canvas, so nothing empty is left under it. Hiding the gesture bar costs
-  // nothing: with no pill there is nothing to clear, and the pane's own 4dp gap
-  // stays.
-  val simpleComposerBottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+  // The floating bar rides the system gesture bar instead of a fixed band of
+  // canvas. Hiding the gesture hint drops the navigation-bar inset to zero,
+  // which left the composer flush with the screen edge; keep a gesture-height
+  // floor so the closed state matches the visible one. With the IME up the pane
+  // already ends at the keyboard, so the floor is only applied while it is down.
+  val navigationBarBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+  val imeOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+  val simpleComposerBottomInset = if (imeOpen) navigationBarBottom else navigationBarBottom.coerceAtLeast(24.dp)
   val inlineMediaPlaybackBlocked = messageSpeechState?.isActive == true || talkModeEnabled || talkModeListening
   val thinkingSupported =
     chatThinkingSupported(
