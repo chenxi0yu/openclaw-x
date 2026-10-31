@@ -643,6 +643,9 @@ class SettingsDetailInsetsTest {
       val viewport = composeRule.onNodeWithTag("appearance-host").fetchSemanticsNode().boundsInRoot
       accents.forEach { accent ->
         val swatch = composeRule.onNodeWithContentDescription(appearanceAccentSwatchDescription(accent))
+        // Accents live in a horizontal rail now; bring each target into view
+        // before asserting its touch bounds.
+        swatch.performScrollTo()
         swatch.assertIsDisplayed()
         val touchBounds = swatch.fetchSemanticsNode().touchBoundsInRoot
         assertTrue("Accent target must remain at least 48dp wide: $touchBounds", touchBounds.width >= 48 * density - 1)

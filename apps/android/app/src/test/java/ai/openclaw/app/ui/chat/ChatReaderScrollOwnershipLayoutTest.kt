@@ -1163,7 +1163,7 @@ class ChatReaderScrollOwnershipLayoutTest {
       live = live,
       content = content,
       timestampMs = null,
-      onReplyMessage = {},
+      onQuoteMessage = {},
       sessionActionsEnabled = false,
       onRewindMessage = {},
       onForkMessage = {},

@@ -15,9 +15,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.outlined.MicNone
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -42,6 +39,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.Locale
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Mic as MiuixMic
+import top.yukonga.miuix.kmp.icon.extended.Pause as MiuixPause
 
 internal enum class ChatDictationFailure {
   Unavailable,
@@ -445,7 +445,7 @@ internal fun ChatComposerMicButton(
       contentAlignment = Alignment.Center,
     ) {
       Icon(
-        imageVector = if (dictationActive) Icons.Default.Stop else Icons.Outlined.MicNone,
+        imageVector = if (dictationActive) MiuixIcons.Medium.MiuixPause else MiuixIcons.Medium.MiuixMic,
         contentDescription = null,
         modifier = Modifier.size(20.dp),
       )

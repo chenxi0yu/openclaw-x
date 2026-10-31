@@ -1,9 +1,7 @@
 package ai.openclaw.app.ui
 
 import ai.openclaw.app.AndroidLicenseNotice
-import ai.openclaw.app.AppLanguage
 import ai.openclaw.app.AppLogRange
-import ai.openclaw.app.AppearanceThemeFamily
 import ai.openclaw.app.AppearanceThemeMode
 import ai.openclaw.app.BuildConfig
 import ai.openclaw.app.captureAppLogSnapshot
@@ -32,11 +30,7 @@ import ai.openclaw.app.R
 import ai.openclaw.app.SensitiveFeatureConfig
 import ai.openclaw.app.VoiceCaptureMode
 import ai.openclaw.app.appLanguageRowSubtitle
-import ai.openclaw.app.appearanceAccentPalette
-import ai.openclaw.app.appearanceAccentPreferenceValue
 import ai.openclaw.app.chat.ChatPendingToolCall
-import ai.openclaw.app.currentAppLanguage
-import ai.openclaw.app.currentSystemLanguageTag
 import ai.openclaw.app.gateway.GatewayEndpoint
 import ai.openclaw.app.gateway.GatewayRegistryEntryKind
 import ai.openclaw.app.gatewayExecApprovalTextForDisplay
@@ -53,7 +47,6 @@ import ai.openclaw.app.locationModeAfterBackgroundSettings
 import ai.openclaw.app.node.DeviceNotificationListenerService
 import ai.openclaw.app.photoReadPermissionsForRequest
 import ai.openclaw.app.reconcileRestoredAction
-import ai.openclaw.app.setAppLanguage
 import ai.openclaw.app.ui.design.ClawAgentAvatar
 import ai.openclaw.app.ui.design.ClawGlassMenuItem
 import ai.openclaw.app.ui.design.ClawGlassTopBarButton
@@ -75,8 +68,6 @@ import ai.openclaw.app.ui.design.ClawTextField
 import ai.openclaw.app.ui.design.ClawTheme
 import ai.openclaw.app.ui.design.ClawTopBarButtonTopInset
 import ai.openclaw.app.ui.design.ClawTopBarContentHeight
-import ai.openclaw.app.ui.design.MAX_APP_TEXT_SCALE
-import ai.openclaw.app.ui.design.MIN_APP_TEXT_SCALE
 import ai.openclaw.app.ui.design.MiuixGroup
 import ai.openclaw.app.ui.design.MiuixGroupDivider
 import ai.openclaw.app.ui.design.MiuixGroupLabel
@@ -84,11 +75,9 @@ import ai.openclaw.app.ui.design.MiuixInputRow
 import ai.openclaw.app.ui.design.MiuixTone
 import ai.openclaw.app.ui.design.MiuixValueRow
 import ai.openclaw.app.ui.design.OpenClawMascot
-import ai.openclaw.app.ui.design.ProvideAppTextScale
 import ai.openclaw.app.ui.design.TalkWaveform
 import ai.openclaw.app.ui.design.TalkWaveformPhase
 import ai.openclaw.app.ui.design.agentAvatarSource
-import ai.openclaw.app.ui.design.appTextScaleSteps
 import ai.openclaw.app.ui.design.clawBackdropTopBar
 import ai.openclaw.app.ui.design.rememberClawBackdrop
 import ai.openclaw.app.ui.design.rememberClawMorphMenuState
@@ -194,7 +183,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -2612,328 +2600,6 @@ internal fun gatewayLimitedAccessUpgradeText(): String =
     "Use a secure wss:// or Tailscale Serve Gateway, generate a full-access setup code in the Control UI or with openclaw qr, then scan or paste it below and reconnect to enable settings and upgrades.",
   )
 
-@Composable
-private fun AppearanceSettingsScreen(
-  viewModel: MainViewModel,
-  onBack: () -> Unit,
-) {
-  val themeMode by viewModel.appearanceThemeMode.collectAsState()
-  val themeFamily by viewModel.appearanceThemeFamily.collectAsState()
-  val accentArgb by viewModel.appearanceAccentArgb.collectAsState()
-  val textScale by viewModel.appearanceTextScale.collectAsState()
-  val hapticsEnabled by viewModel.hapticsEnabled.collectAsState()
-  val context = LocalContext.current
-  // Re-seeded whenever the committed value changes, so the thumb follows both
-  // slider drags and any external reset without fighting the drag in progress.
-  var textScaleDraft by remember(textScale) { mutableFloatStateOf(textScale) }
-  var appLanguage by remember { mutableStateOf(currentAppLanguage()) }
-  val systemLanguageTag = currentSystemLanguageTag(context)
-
-  SettingsDetailFrame(title = nativeString("Appearance"), subtitle = nativeString("Theme and translated Android text."), icon = Icons.Default.Palette, onBack = onBack) {
-    ClawPanel {
-      Column(verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs)) {
-        Text(text = nativeString("Theme family"), style = ClawTheme.type.section, color = ClawTheme.colors.text)
-        AppearanceThemeFamily.entries.chunked(2).forEach { rowFamilies ->
-          Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs),
-          ) {
-            rowFamilies.forEach { family ->
-              AppearanceThemeFamilyCard(
-                family = family,
-                selected = family == themeFamily,
-                onClick = { viewModel.setAppearanceThemeFamily(family) },
-                modifier = Modifier.weight(1f),
-              )
-            }
-            if (rowFamilies.size == 1) Spacer(modifier = Modifier.weight(1f))
-          }
-        }
-        Text(
-          text = nativeString("Color mode"),
-          style = ClawTheme.type.section,
-          color = ClawTheme.colors.text,
-          modifier = Modifier.padding(top = ClawTheme.spacing.xxs),
-        )
-        ClawSegmentedControl(
-          options = appearanceThemeOptions(),
-          selected = appearanceThemeSummary(themeMode),
-          onSelect = { selected -> viewModel.setAppearanceThemeMode(appearanceThemeModeForLabel(selected)) },
-        )
-        Text(
-          text = nativeString("Accent color"),
-          style = ClawTheme.type.section,
-          color = ClawTheme.colors.text,
-          modifier = Modifier.padding(top = ClawTheme.spacing.xxs),
-        )
-        (listOf<Long?>(null) + appearanceAccentPalette).chunked(5).forEach { accentRow ->
-          Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs),
-          ) {
-            accentRow.forEach { candidate ->
-              AppearanceAccentSwatch(
-                argb = candidate,
-                previewArgb = candidate ?: themeFamily.previewAccentArgb,
-                selected = candidate == accentArgb,
-                onClick = { viewModel.setAppearanceAccentArgb(candidate) },
-              )
-            }
-          }
-        }
-      }
-    }
-    ClawPanel {
-      Column(verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs)) {
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-          Text(
-            text = nativeString("Text size"),
-            style = ClawTheme.type.section,
-            color = ClawTheme.colors.text,
-          )
-          Text(
-            text = "${(textScaleDraft * 100).roundToInt()}%",
-            style = ClawTheme.type.caption,
-            color = ClawTheme.colors.textMuted,
-          )
-        }
-        Slider(
-          value = textScaleDraft,
-          onValueChange = { textScaleDraft = it },
-          // Committing only on release keeps the whole app from re-measuring on
-          // every frame of the drag; the preview below tracks the draft live.
-          onValueChangeFinished = { viewModel.setAppearanceTextScale(textScaleDraft) },
-          valueRange = MIN_APP_TEXT_SCALE..MAX_APP_TEXT_SCALE,
-          steps = appTextScaleSteps(),
-          modifier = Modifier.fillMaxWidth(),
-          colors =
-            SliderDefaults.colors(
-              thumbColor = ClawTheme.colors.text,
-              activeTrackColor = ClawTheme.colors.primary,
-              inactiveTrackColor = ClawTheme.colors.borderStrong,
-            ),
-        )
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          Text(text = "A", style = ClawTheme.type.caption, color = ClawTheme.colors.textSubtle)
-          Text(text = "A", style = ClawTheme.type.title, color = ClawTheme.colors.textSubtle)
-        }
-        // The whole app is already scaled by the committed value, so the preview
-        // only needs the relative difference to show the draft at true size.
-        ProvideAppTextScale(scale = textScaleDraft / textScale) {
-          AppearanceTextScalePreview()
-        }
-      }
-    }
-    SettingsTogglePanel(
-      rows =
-        listOf(
-          SettingsToggleRow(
-            title = nativeString("Haptics"),
-            subtitle = nativeString("Buzz on chat controls: sidebar, new chat, menu, attachments, model, thinking, and the thinking slider."),
-            icon = Icons.Default.Vibration,
-            checked = hapticsEnabled,
-            onCheckedChange = viewModel::setHapticsEnabled,
-          ),
-        ),
-    )
-    ClawPanel {
-        Column(verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs)) {
-          Text(text = nativeString("Media cache"), style = ClawTheme.type.section, color = ClawTheme.colors.text)
-          Text(
-            text = nativeString("Downloaded inbound images are kept locally and reused when available."),
-            style = ClawTheme.type.caption,
-            color = ClawTheme.colors.textMuted,
-          )
-          ClawSecondaryButton(
-            text = nativeString("Clear image cache"),
-            onClick = viewModel::clearChatImageCache,
-            modifier = Modifier.fillMaxWidth(),
-          )
-        }
-    }
-    ClawPanel {
-      Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(text = nativeString("App language"), style = ClawTheme.type.section, color = ClawTheme.colors.text)
-        AppLanguage.entries.forEachIndexed { index, language ->
-          if (index > 0) HorizontalDivider(color = ClawTheme.colors.border)
-          AppLanguageRow(
-            language = language,
-            selected = language == appLanguage,
-            systemLanguageTag = systemLanguageTag,
-            onClick = {
-              appLanguage = language
-              setAppLanguage(language)
-            },
-          )
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun AppearanceTextScalePreview() {
-  val shape = RoundedCornerShape(ClawTheme.radii.control)
-  Surface(
-    modifier = Modifier.fillMaxWidth(),
-    shape = shape,
-    color = ClawTheme.colors.canvas,
-    border = BorderStroke(1.dp, ClawTheme.colors.border),
-  ) {
-    Column(
-      modifier = Modifier.padding(ClawTheme.spacing.xs),
-      verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxxs),
-    ) {
-      Text(
-        text = nativeString("Text size preview"),
-        style = ClawTheme.type.label,
-        color = ClawTheme.colors.text,
-      )
-      Text(
-        text = nativeString("Every screen scales with this slider, including chat transcripts and sidebar rows."),
-        style = ClawTheme.type.body,
-        color = ClawTheme.colors.textMuted,
-      )
-      Text(
-        text = nativeString("Session · just now"),
-        style = ClawTheme.type.caption,
-        color = ClawTheme.colors.textSubtle,
-      )
-    }
-  }
-}
-
-@Composable
-private fun AppearanceThemeFamilyCard(
-  family: AppearanceThemeFamily,
-  selected: Boolean,
-  onClick: () -> Unit,
-  modifier: Modifier = Modifier,
-) {
-  val shape = RoundedCornerShape(ClawTheme.radii.control)
-  Column(
-    modifier =
-      modifier
-        .heightIn(min = 72.dp)
-        .clip(shape)
-        .background(if (selected) ClawTheme.colors.surfacePressed else ClawTheme.colors.surface)
-        .border(1.dp, if (selected) ClawTheme.colors.primary else ClawTheme.colors.borderStrong, shape)
-        .clickable(onClick = onClick)
-        .padding(ClawTheme.spacing.xs),
-    verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs),
-  ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Row(
-        modifier = Modifier.weight(1f),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-      ) {
-        listOf(family.previewAccentArgb, family.previewSecondaryArgb, family.previewCanvasArgb).forEach { color ->
-          Box(
-            modifier =
-              Modifier
-                .size(13.dp)
-                .clip(CircleShape)
-                .background(Color(color))
-                .border(1.dp, ClawTheme.colors.borderStrong, CircleShape),
-          )
-        }
-      }
-      if (selected) {
-        Icon(
-          imageVector = Icons.Default.Check,
-          contentDescription = nativeString("Selected"),
-          tint = ClawTheme.colors.primary,
-          modifier = Modifier.size(18.dp),
-        )
-      }
-    }
-    Text(text = family.displayLabel, style = ClawTheme.type.label, color = ClawTheme.colors.text)
-  }
-}
-
-internal fun appearanceAccentSwatchDescription(argb: Long?): String =
-  listOf(
-    nativeString("Accent color"),
-    appearanceAccentPreferenceValue(argb)?.uppercase() ?: nativeString("Default"),
-  ).joinToString(", ")
-
-@Composable
-private fun AppearanceAccentSwatch(
-  argb: Long?,
-  previewArgb: Long,
-  selected: Boolean,
-  onClick: () -> Unit,
-) {
-  IconButton(
-    onClick = onClick,
-    modifier =
-      Modifier
-        .size(48.dp)
-        .semantics {
-          contentDescription = appearanceAccentSwatchDescription(argb)
-          this.selected = selected
-        },
-  ) {
-    Box(
-      modifier =
-        Modifier
-          .size(34.dp)
-          .clip(CircleShape)
-          .background(Color(previewArgb))
-          .border(if (selected) 3.dp else 1.dp, if (selected) ClawTheme.colors.text else ClawTheme.colors.borderStrong, CircleShape),
-      contentAlignment = Alignment.Center,
-    ) {
-      if (selected) {
-        Icon(
-          imageVector = Icons.Default.Check,
-          contentDescription = null,
-          tint = ClawTheme.colors.canvas,
-          modifier = Modifier.size(18.dp),
-        )
-      }
-    }
-  }
-}
-
-@Composable
-private fun AppLanguageRow(
-  language: AppLanguage,
-  selected: Boolean,
-  systemLanguageTag: String,
-  onClick: () -> Unit,
-) {
-  ClawListItem(
-    title = appLanguageTitle(language),
-    subtitle = appLanguageRowSubtitle(language = language, systemLanguageTag = systemLanguageTag),
-    leading = { ClawIconBadge(Icons.Default.Language) },
-    trailing =
-      if (selected) {
-        {
-          Icon(
-            imageVector = Icons.Default.Check,
-            contentDescription = nativeString("Selected"),
-            modifier = Modifier.size(18.dp),
-            tint = ClawTheme.colors.primary,
-          )
-        }
-      } else {
-        null
-      },
-    onClick = onClick,
-  )
-}
-
-private fun appLanguageTitle(language: AppLanguage): String = if (language == AppLanguage.System) nativeString("System") else language.displayName
-
-// Literal lookups keep every mode visible to the phone localization extractor.
 internal fun appearanceThemeSummary(mode: AppearanceThemeMode): String =
   when (mode) {
     AppearanceThemeMode.System -> nativeString("System")

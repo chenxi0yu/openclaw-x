@@ -15,6 +15,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -190,7 +191,7 @@ class ChatControllerCommandControlsTest {
       controller.load("main")
       advanceUntilIdle()
 
-      assertTrue(controller.startNewChatAwait())
+      assertNotNull(controller.startNewChatAwait())
 
       val create = requests.first { it.first == "sessions.create" }
       assertTrue(create.second.orEmpty().contains("\"agentId\":\"main\""))
@@ -225,12 +226,158 @@ class ChatControllerCommandControlsTest {
       controller.load("main")
       advanceUntilIdle()
 
-      assertTrue(controller.startNewChatAwait())
+      assertNotNull(controller.startNewChatAwait())
       advanceUntilIdle()
       assertFalse(controller.sessions.value.any { it.key == draftKey })
 
       assertTrue(controller.sendMessageAwaitAcceptance("hello", "off", emptyList()))
       assertTrue(controller.sessions.value.any { it.key == draftKey })
+    }
+
+  @Test
+  fun plainNewChatStaysLocalUntilTheFirstSendCreatesTheSession() =
+    runTest {
+      val createdKey = "agent:main:dashboard:fresh"
+      val (controller, requests) =
+        chatControllerTestSetup {
+          respond("sessions.create", """{"ok":true,"key":"$createdKey"}""")
+          respond("chat.history", """{"sessionId":"fresh-session","messages":[]}""")
+          respond("sessions.list", """{"sessions":[]}""")
+          respond("health", "{}")
+          respond("chat.send", """{"runId":"run-1"}""")
+        }
+      controller.handleGatewayEvent("health", null)
+      controller.load("main")
+      advanceUntilIdle()
+
+      controller.startNewChat()
+      advanceUntilIdle()
+
+      // Tapping "+" must never leave an empty "New chat" row on the gateway: the
+      // first send is the session's first turn, so only it may create the session.
+      assertTrue(requests.none { it.first == "sessions.create" })
+      assertTrue(controller.localNewChatDraft.value)
+      assertTrue(controller.messages.value.isEmpty())
+
+      assertTrue(controller.sendMessageAwaitAcceptance("hello", "off", emptyList()))
+      advanceUntilIdle()
+
+      assertEquals(1, requests.count { it.first == "sessions.create" })
+      assertEquals(createdKey, controller.sessionKey.value)
+      val send = requests.first { it.first == "chat.send" }
+      assertTrue(send.second.orEmpty().contains(createdKey))
+      assertFalse(controller.localNewChatDraft.value)
+    }
+
+  @Test
+  fun firstSendAfterNewChatKeepsTheDraftOwnerItWasIssuedFrom() =
+    runTest {
+      val createdKey = "agent:main:dashboard:fresh"
+      val (controller, requests) =
+        chatControllerTestSetup {
+          respond("sessions.create", """{"ok":true,"key":"$createdKey"}""")
+          respond("chat.history", """{"sessionId":"fresh-session","messages":[]}""")
+          respond("sessions.list", """{"sessions":[]}""")
+          respond("health", "{}")
+          respond("chat.send", """{"runId":"run-1"}""")
+        }
+      controller.handleGatewayEvent("health", null)
+      controller.load("agent:main:main")
+      advanceUntilIdle()
+
+      controller.startNewChat()
+      advanceUntilIdle()
+      // The composer captured this owner while the draft still read as the previous key.
+      // Creating the session inside the send moves the UI with it, so that captured owner
+      // must stay valid — otherwise every new chat drops its first message and hands the
+      // text back to the input box.
+      val draftOwner = ChatComposerOwner("gateway-test", "main", controller.sessionKey.value)
+      assertTrue(controller.isCurrentComposerOwner(draftOwner))
+
+      assertTrue(
+        controller.sendMessageForOwnerAwaitAcceptance(
+          message = "hello",
+          thinkingLevel = "off",
+          attachments = emptyList(),
+          expectedOwner = draftOwner,
+        ),
+      )
+      advanceUntilIdle()
+
+      assertEquals(1, requests.count { it.first == "sessions.create" })
+      assertEquals(createdKey, controller.sessionKey.value)
+      val send = requests.firstOrNull { it.first == "chat.send" }
+      assertTrue("the draft's first turn must reach the gateway", send?.second.orEmpty().contains(createdKey))
+      assertFalse(controller.localNewChatDraft.value)
+      assertEquals(
+        "the turn belongs to the outbox bubble, not the composer draft",
+        listOf("hello"),
+        controller.outboxItems.value.map { item -> item.text },
+      )
+    }
+
+  @Test
+  fun reselectingTheSessionADraftBlankedRepaintsItsTranscript() =
+    runTest {
+      val (controller, _) =
+        chatControllerTestSetup {
+          respond(
+            "chat.history",
+            """{"sessionId":"session-main","messages":[{"role":"user","content":"hello"}]}""",
+          )
+          respond("sessions.list", """{"sessions":[]}""")
+          respond("health", "{}")
+        }
+      controller.handleGatewayEvent("health", null)
+      controller.load("main")
+      advanceUntilIdle()
+      assertFalse(controller.messages.value.isEmpty())
+
+      controller.startNewChat()
+      assertTrue(controller.localNewChatDraft.value)
+      assertTrue(controller.messages.value.isEmpty())
+
+      controller.switchSession("main")
+      advanceUntilIdle()
+
+      assertFalse(controller.localNewChatDraft.value)
+      assertEquals(listOf("hello"), controller.messages.value.map { it.content.single().text })
+    }
+
+  @Test
+  fun draftSessionSettingCreatesTheSessionBeforePatchingIt() =
+    runTest {
+      val createdKey = "agent:main:dashboard:fresh"
+      val (controller, requests) =
+        chatControllerTestSetup {
+          respond("sessions.create", """{"ok":true,"key":"$createdKey"}""")
+          respond(
+            "chat.history",
+            """{"sessionId":"fresh-session","messages":[],"sessionInfo":{"key":"$createdKey","agentId":"main","sessionId":"fresh-session"}}""",
+          )
+          respond(
+            "sessions.patch",
+            """{"ok":true,"entry":{"key":"$createdKey","sessionId":"fresh-session","model":"synthetic/model"}}""",
+          )
+          respond("sessions.list", """{"sessions":[]}""")
+          respond("health", "{}")
+        }
+      controller.handleGatewayEvent("health", null)
+      controller.load("main")
+      advanceUntilIdle()
+
+      controller.startNewChat()
+      advanceUntilIdle()
+      val draftKey = controller.sessionKey.value
+      assertTrue(controller.setSessionModelAwait(draftKey, "synthetic/model"))
+      advanceUntilIdle()
+
+      val createIndex = requests.indexOfFirst { it.first == "sessions.create" }
+      val patchIndex = requests.indexOfFirst { it.first == "sessions.patch" }
+      assertTrue("The setting write must create the draft session first", createIndex >= 0 && patchIndex > createIndex)
+      // The patch belongs to the new conversation, never to the one the draft blanked.
+      assertTrue(requests[patchIndex].second.orEmpty().contains(createdKey))
+      assertFalse(requests[patchIndex].second.orEmpty().contains("\"key\":\"$draftKey\""))
     }
 
   @Test
@@ -253,7 +400,7 @@ class ChatControllerCommandControlsTest {
           if (action == "fork") {
             controller.forkSession("main", ownerAgentId = "main") != null
           } else {
-            controller.startNewChatAwait(worktree = action == "worktree")
+            controller.startNewChatAwait(worktree = action == "worktree") != null
           }
 
         assertFalse("$action must not create a child of a locked parent", accepted)
@@ -315,7 +462,7 @@ class ChatControllerCommandControlsTest {
             if (fork) {
               controller.forkSession("main", ownerAgentId = "main") != null
             } else {
-              controller.startNewChatAwait(worktree = true)
+              controller.startNewChatAwait(worktree = true) != null
             }
           }
 
@@ -364,7 +511,7 @@ class ChatControllerCommandControlsTest {
 
       // Worktree requests are the ones that still carry parent lineage; an older
       // gateway rejects the lifecycle fields and the retry drops just those.
-      assertTrue(controller.startNewChatAwait(worktree = true))
+      assertNotNull(controller.startNewChatAwait(worktree = true))
 
       val creates = requests.filter { it.first == "sessions.create" }
       assertEquals(2, creates.size)
@@ -398,10 +545,17 @@ class ChatControllerCommandControlsTest {
         controller.load("main")
         advanceUntilIdle()
 
-        assertTrue("New session must work with catalog=$catalogId", controller.startNewChatAwait(catalogId = catalogId))
+        assertNotNull("New session must work with catalog=$catalogId", controller.startNewChatAwait(catalogId = catalogId))
 
         val create = json.parseToJsonElement(requests.single { it.first == "sessions.create" }.second.orEmpty()).jsonObject
-        assertEquals(setOfNotNull("agentId", catalogId?.let { "catalogId" }), create.keys)
+        // A parentless New announces itself to plugin session-start hooks.
+        val expectedKeys =
+          setOfNotNull(
+            "agentId",
+            catalogId?.let { "catalogId" },
+            "emitCommandHooks".takeIf { catalogId == null },
+          )
+        assertEquals(expectedKeys, create.keys)
         assertEquals(JsonPrimitive("main"), create["agentId"])
         assertEquals(catalogId?.let(::JsonPrimitive), create["catalogId"])
         assertEquals("agent:main:dashboard:fresh", controller.sessionKey.value)
@@ -423,7 +577,7 @@ class ChatControllerCommandControlsTest {
       controller.load("main")
       advanceUntilIdle()
 
-      assertTrue(controller.startNewChatAwait(worktree = true))
+      assertNotNull(controller.startNewChatAwait(worktree = true))
 
       val create = requests.first { it.first == "sessions.create" }
       assertTrue(create.second.orEmpty().contains("\"worktree\":true"))
@@ -448,7 +602,7 @@ class ChatControllerCommandControlsTest {
         archived = false,
         unread = true,
       )
-      controller.deleteSession("main", ownerAgentId = "main")
+      controller.deleteSession("main", ownerAgentId = "main", expectedSessionId = "session-main")
 
       val patch = requests.first { it.first == "sessions.patch" }.second.orEmpty()
       assertTrue(patch.contains("\"key\":\"main\""))
@@ -463,7 +617,8 @@ class ChatControllerCommandControlsTest {
       val delete = requests.first { it.first == "sessions.delete" }.second.orEmpty()
       assertTrue(delete.contains("\"key\":\"main\""))
       assertTrue(delete.contains("\"deleteTranscript\":true"))
-      assertEquals(2, requests.count { it.first == "sessions.list" })
+      // Direct patch, the archive-then-delete patch, and the delete each refresh the list.
+      assertEquals(3, requests.count { it.first == "sessions.list" })
     }
 
   @Test
@@ -925,7 +1080,7 @@ class ChatControllerCommandControlsTest {
         }
       controller.handleGatewayEvent("health", null)
 
-      assertTrue(controller.startNewChatAwait())
+      assertNotNull(controller.startNewChatAwait())
 
       val create = requests.first { it.first == "sessions.create" }
       assertTrue(create.second.orEmpty().contains("\"agentId\":\"main\""))
@@ -948,7 +1103,7 @@ class ChatControllerCommandControlsTest {
       controller.switchSession("agent:ops:dashboard:parent")
       advanceUntilIdle()
 
-      assertTrue(controller.startNewChatAwait())
+      assertNotNull(controller.startNewChatAwait())
 
       val create = requests.first { it.first == "sessions.create" }
       assertTrue(create.second.orEmpty().contains("\"agentId\":\"ops\""))
@@ -988,7 +1143,7 @@ class ChatControllerCommandControlsTest {
 
       assertTrue(controller.sendMessageAwaitAcceptance("hello", "off", emptyList()))
       assertEquals(1, controller.pendingRunCount.value)
-      assertEquals(false, controller.startNewChatAwait())
+      assertNull(controller.startNewChatAwait())
       assertTrue(requests.none { it.first == "sessions.create" })
     }
 
@@ -1019,8 +1174,8 @@ class ChatControllerCommandControlsTest {
       advanceUntilIdle()
       releaseCreate.complete(Unit)
 
-      assertTrue(first.await())
-      assertEquals(false, second.await())
+      assertNotNull(first.await())
+      assertNull(second.await())
       assertEquals(1, createCount)
       assertEquals(1, requests.count { it.first == "sessions.create" })
     }
@@ -1068,7 +1223,7 @@ class ChatControllerCommandControlsTest {
         assertTrue("A completed history tail must not clear New's progress", controller.isCreatingSession.value)
         assertFalse(controller.historyLoading.value)
         releaseCreate.complete(Unit)
-        assertTrue(create.await())
+        assertNotNull(create.await())
         assertEquals(key, controller.sessionKey.value)
         assertEquals("fresh-session", controller.sessionId.value)
         assertFalse(controller.isCreatingSession.value)
@@ -1123,7 +1278,7 @@ class ChatControllerCommandControlsTest {
           releaseCreate.complete(Unit)
         }
 
-        assertTrue("New must survive same-session history; refreshLoadedParent=$refreshLoadedParent", create.await())
+        assertNotNull("New must survive same-session history; refreshLoadedParent=$refreshLoadedParent", create.await())
         assertEquals("agent:main:dashboard:fresh", controller.sessionKey.value)
         assertEquals("fresh-session", controller.sessionId.value)
         assertFalse(controller.isCreatingSession.value)
@@ -1220,7 +1375,7 @@ class ChatControllerCommandControlsTest {
           val historyRequests = gateway.callCount("chat.history")
           createResponse.complete("""{"ok":true,"key":"agent:main:dashboard:fresh"}""")
 
-          assertFalse("A stale create must not select its result after $change", create.await())
+          assertNull("A stale create must not select its result after $change", create.await())
           runCurrent()
           assertFalse(controller.isCreatingSession.value)
           assertEquals(selectedKey, controller.sessionKey.value)
@@ -1261,7 +1416,7 @@ class ChatControllerCommandControlsTest {
         assertTrue(controller.historyLoading.value)
 
         createResponse.completeExceptionally(IllegalStateException("old create failed"))
-        assertFalse(create.await())
+        assertNull(create.await())
         assertEquals("other", controller.sessionKey.value)
         assertFalse(controller.isCreatingSession.value)
         assertTrue(controller.historyLoading.value)
@@ -1296,7 +1451,7 @@ class ChatControllerCommandControlsTest {
       assertNull(controller.errorText.value)
       cancelCreate = false
 
-      assertTrue(controller.startNewChatAwait())
+      assertNotNull(controller.startNewChatAwait())
       assertEquals("agent:main:dashboard:fresh", controller.sessionKey.value)
     }
 

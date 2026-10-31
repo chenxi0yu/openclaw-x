@@ -68,7 +68,7 @@ class ChatMessageViewsTest {
             live = live,
             content = listOf(ChatMessageContent(type = "text", text = body)),
             timestampMs = null,
-            onReplyMessage = {},
+            onQuoteMessage = {},
             sessionActionsEnabled = true,
             onRewindMessage = {},
             onForkMessage = {},
@@ -108,23 +108,14 @@ class ChatMessageViewsTest {
     composeRule.onAllNodesWithText("OpenClaw · Live", useUnmergedTree = true).assertCountEquals(1)
 
     userBubble.performSemanticsAction(SemanticsActions.OnLongClick) { action -> action() }
-    listOf("Select text", "Reply", "Rewind to here", "Fork from here").forEach { label ->
+    listOf("Select text", "Follow up", "Rewind to here", "Fork from here").forEach { label ->
       composeRule.onNode(hasText(label) and hasClickAction()).assertExists()
     }
-    composeRule.onNodeWithText("Select text").performClick()
-    composeRule.onAllNodesWithText("user body").assertCountEquals(1)
-    composeRule.runOnIdle {
-      val reader = nativeReaders().single()
-      assertEquals("user body", reader.text.toString())
-      assertTrue(reader.isShown && reader.width > 0 && reader.height > 0)
-      assertTrue(reader.getGlobalVisibleRect(Rect()))
-    }
-    composeRule.onNode(hasText("Done") and hasClickAction()).performClick()
     composeRule.runOnIdle { assertTrue(nativeReaders().isEmpty()) }
 
     assistantBubble.performSemanticsAction(SemanticsActions.OnLongClick) { action -> action() }
     composeRule.onNode(hasText("Listen") and hasClickAction()).assertExists()
-    composeRule.onNode(hasText("Reply") and hasClickAction()).assertExists()
+    composeRule.onNode(hasText("Follow up") and hasClickAction()).assertExists()
   }
 
   @Test
@@ -155,7 +146,7 @@ class ChatMessageViewsTest {
                 ),
               ),
             timestampMs = null,
-            onReplyMessage = { actions += "reply:$it" },
+            onQuoteMessage = { quote -> actions += "quote:" + quote.text },
             sessionActionsEnabled = fileName != "disabled.pdf",
             onRewindMessage = { actions += "rewind:$it" },
             onForkMessage = { actions += "fork:$it" },
@@ -189,7 +180,7 @@ class ChatMessageViewsTest {
       listOf("Rewind to here", "Fork from here").forEach { label ->
         composeRule.onNode(hasText(label) and hasClickAction()).assertExists()
       }
-      listOf("Copy", "Select text", "Share", "Reply", "Listen").forEach { label ->
+      listOf("Copy", "Select text", "Share", "Follow up", "Listen").forEach { label ->
         composeRule.onAllNodesWithText(label).assertCountEquals(0)
       }
       composeRule.onNodeWithText(selectedAction).performClick()
@@ -223,7 +214,7 @@ class ChatMessageViewsTest {
                 live = false,
                 content = message.content,
                 timestampMs = null,
-                onReplyMessage = {},
+                onQuoteMessage = {},
                 sessionActionsEnabled = false,
                 onRewindMessage = {},
                 onForkMessage = {},
@@ -304,7 +295,7 @@ class ChatMessageViewsTest {
               ),
             ),
           timestampMs = null,
-          onReplyMessage = {},
+          onQuoteMessage = {},
           sessionActionsEnabled = false,
           onRewindMessage = {},
           onForkMessage = {},
@@ -352,7 +343,7 @@ class ChatMessageViewsTest {
             ),
           ),
         timestampMs = null,
-        onReplyMessage = {},
+        onQuoteMessage = {},
         sessionActionsEnabled = false,
         onRewindMessage = {},
         onForkMessage = {},
@@ -406,7 +397,7 @@ class ChatMessageViewsTest {
             live = false,
             content = images,
             timestampMs = null,
-            onReplyMessage = {},
+            onQuoteMessage = {},
             sessionActionsEnabled = false,
             onRewindMessage = {},
             onForkMessage = {},
@@ -459,7 +450,7 @@ class ChatMessageViewsTest {
             ),
           ),
         timestampMs = null,
-        onReplyMessage = {},
+        onQuoteMessage = {},
         sessionActionsEnabled = false,
         onRewindMessage = {},
         onForkMessage = {},

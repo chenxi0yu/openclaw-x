@@ -1,8 +1,11 @@
 package ai.openclaw.app.ui.chat
 
 import ai.openclaw.app.chat.CHAT_IMAGE_MAX_BASE64_CHARS
+import ai.openclaw.app.chat.ChatMessageContent
 import ai.openclaw.app.i18n.nativeString
+import ai.openclaw.app.ui.design.ClawPlainIconButton
 import ai.openclaw.app.ui.design.ClawTheme
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -10,6 +13,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
@@ -17,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,13 +30,18 @@ import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -50,8 +60,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.takeOrElse
+import kotlinx.coroutines.launch
 import org.commonmark.Extension
 import org.commonmark.ext.autolink.AutolinkExtension
 import org.commonmark.ext.gfm.strikethrough.Strikethrough
@@ -89,11 +102,20 @@ import java.net.URI
 import java.util.Locale
 import org.commonmark.node.Image as MarkdownImage
 import org.commonmark.node.Text as MarkdownTextNode
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Copy as MiuixCopy
+import top.yukonga.miuix.kmp.icon.extended.Download as MiuixDownload
 
 private const val LIST_INDENT_DP = 14
 private const val DATA_IMAGE_HEADER_MAX_CHARS = 64
 internal const val CHAT_MARKDOWN_DISCLOSURE_MAX_DEPTH = 32
 private val dataImageRegex = Regex("^data:image/([a-zA-Z0-9+.-]+);base64,([A-Za-z0-9+/=\\n\\r]+)$")
+
+/**
+ * False inside a message bubble: the bubble owns selection and long-press, so nested code and
+ * diagram text must not install their own system selection container.
+ */
+internal val LocalChatMarkdownNativeSelection = compositionLocalOf { true }
 
 private val markdownParser: Parser by lazy {
   val extensions: List<Extension> =
@@ -109,6 +131,76 @@ private val markdownParser: Parser by lazy {
     .includeSourceSpans(IncludeSourceSpans.BLOCKS_AND_INLINES)
     .build()
 }
+
+/**
+ * Plain text closest to what the transcript paints for [source]. Used only for matching a
+ * quoted snippet back to its source message, so it keeps link labels, inline code, and code
+ * block literals while dropping markdown markers, markers for task boxes, and image alt text
+ * that the bubble renders as media.
+ */
+internal fun chatMarkdownDisplayText(source: String): String {
+  if (source.isBlank()) return ""
+  val document = markdownParser.parse(source)
+  val out = StringBuilder(source.length)
+  fun newline() {
+    if (out.isNotEmpty() && out.last() != '\n') out.append('\n')
+  }
+
+  fun walk(node: Node) {
+    when (node) {
+      is MarkdownImage, is TaskListItemMarker -> return
+      is MarkdownTextNode -> out.append(node.literal)
+      is Code -> out.append(node.literal)
+      is FencedCodeBlock -> {
+        newline()
+        out.append(node.literal.orEmpty())
+        newline()
+      }
+      is IndentedCodeBlock -> {
+        newline()
+        out.append(node.literal.orEmpty())
+        newline()
+      }
+      is SoftLineBreak, is HardLineBreak -> out.append('\n')
+      is HtmlInline -> out.append(node.literal)
+      is HtmlBlock -> out.append(node.literal)
+      else -> Unit
+    }
+    var child = node.firstChild
+    while (child != null) {
+      val next = child.next
+      walk(child)
+      child = next
+    }
+    when (node) {
+      is Paragraph,
+      is Heading,
+      is BlockQuote,
+      is ListItem,
+      is TableRow,
+      is TableBlock,
+      is TableHead,
+      is TableBody,
+      is ThematicBreak,
+      -> newline()
+
+      is TableCell -> out.append(' ')
+      else -> Unit
+    }
+  }
+
+  walk(document)
+  return out.toString().trim()
+}
+
+/** Rendered plain text for a transcript message; used to match a quote to its source. */
+internal fun chatMessageDisplayText(content: List<ChatMessageContent>): String =
+  content
+    .asSequence()
+    .filter { it.type == "text" }
+    .mapNotNull { part -> part.text?.takeIf(String::isNotBlank)?.let(::chatMarkdownDisplayText) }
+    .filter(String::isNotBlank)
+    .joinToString("\n\n")
 
 /** Renders gateway/chat Markdown using the restricted mobile-safe feature set. */
 @Composable
@@ -134,7 +226,9 @@ fun ChatMarkdown(
     for (block in blocks) {
       when (block) {
         is ChatMarkdownSourceBlock.Markdown -> {
-          val documentBlocks = remember(block.source) { parseChatMarkdownBlocks(block.source) }
+          // CommonMark resolves backslash escapes before inline math is cut out;
+          // protecting the formula first keeps `\\` row breaks intact.
+          val documentBlocks = remember(block.source) { parseChatMarkdownBlocks(protectChatInlineMath(block.source)) }
           RenderMarkdownBlocks(
             blocks = documentBlocks,
             textColor = textColor,
@@ -228,26 +322,36 @@ private fun RenderCommonMarkBlock(
         level <= 4 -> 12.dp
         else -> 8.dp
       }
-      Text(
+      // Headings carry LaTeX too; the shared renderer keeps the formula inline
+      // at the heading's own size instead of printing the raw `$...$`.
+      RenderChatInlineText(
         text = headingText,
         style = headingStyle(current.level, inlineStyles.baseCallout),
-        color = textColor,
+        textColor = textColor,
         modifier = (anchor?.modifier ?: Modifier).padding(top = topSpacing),
-        onTextLayout = anchor?.onTextLayout ?: {},
+        onTextLayout = anchor?.onTextLayout,
       )
     }
 
     is FencedCodeBlock -> {
-      if (isChatMermaidFence(current, isStreaming)) {
-        ChatMermaidBlock(current.literal.orEmpty())
-      } else {
-        ChatCodeBlock(
-          code = current.literal.orEmpty(),
-          language = current.info?.trim()?.ifEmpty { null },
-          // Streaming fences remain plain until closed. Finalized messages may validly
-          // end at EOF without a closing fence under CommonMark.
-          isComplete = !isStreaming || current.closingFenceLength != null,
-        )
+      when {
+        isChatMermaidFence(current, isStreaming) -> {
+          ChatMermaidBlock(current.literal.orEmpty())
+        }
+
+        isChatTextDiagramFence(current, isStreaming) -> {
+          ChatTextDiagramBlock(current.literal.orEmpty())
+        }
+
+        else -> {
+          ChatCodeBlock(
+            code = current.literal.orEmpty(),
+            language = current.info?.trim()?.ifEmpty { null },
+            // Streaming fences remain plain until closed. Finalized messages may validly
+            // end at EOF without a closing fence under CommonMark.
+            isComplete = !isStreaming || current.closingFenceLength != null,
+          )
+        }
       }
     }
 
@@ -342,12 +446,16 @@ private fun RenderLiteralHtml(
   val literal = source.trim()
   if (literal.isNotEmpty()) {
     val anchor = rememberChatReaderAnchor()
+    val hit = rememberChatTextHitTarget()
     Text(
       text = literal,
       style = ClawTheme.type.body.copy(fontFamily = FontFamily.Monospace),
       color = textColor,
-      modifier = anchor?.modifier ?: Modifier,
-      onTextLayout = anchor?.onTextLayout,
+      modifier = (anchor?.modifier ?: Modifier).then(hit.modifier),
+      onTextLayout = {
+        hit.onTextLayout(it)
+        anchor?.onTextLayout?.invoke(it)
+      },
     )
   }
 }
@@ -453,42 +561,76 @@ private fun RenderInlineMarkdownRange(
   if (annotated.text.trimEnd().isEmpty()) {
     return
   }
+  val anchor = rememberChatReaderAnchor()
+  RenderChatInlineText(
+    text = annotated,
+    style = inlineStyles.baseCallout,
+    textColor = textColor,
+    modifier = anchor?.modifier ?: Modifier,
+    onTextLayout = anchor?.onTextLayout,
+  )
+}
 
-  // Inline math arrives inside a text literal, so it is cut out here rather than by
-  // the block segmenter. Only text that actually contains a dollar sign pays for it.
+/**
+ * One text run that may contain inline formulas. The marked-up text is copied
+ * around each formula so bold, inline code, and links survive; a formula the TeX
+ * engine cannot lay out degrades to its source without the `$` delimiters.
+ */
+@Composable
+private fun RenderChatInlineText(
+  text: AnnotatedString,
+  style: TextStyle,
+  textColor: Color,
+  modifier: Modifier,
+  mathMaxWidth: Dp? = null,
+  onTextLayout: ((androidx.compose.ui.text.TextLayoutResult) -> Unit)? = null,
+) {
+  // Inline code renders monospace; some devices' monospace font has no
+  // super/subscript glyphs, so that range is retargeted at the app font.
+  val fallbackFamily = ClawTheme.type.body.fontFamily
+  val styled = remember(text, fallbackFamily) { text.withScriptGlyphFallback(fallbackFamily) }
   val segments =
-    remember(annotated.text) {
-      if (annotated.text.contains('$')) splitInlineLatex(annotated.text) else emptyList()
+    remember(styled.text) {
+      if (containsInlineMath(styled.text)) splitInlineLatex(styled.text) else emptyList()
     }
   val mathSegments = segments.filterIsInstance<InlineLatexSegment.Math>()
-  val anchor = rememberChatReaderAnchor()
+  val hit = rememberChatTextHitTarget()
+  val targetModifier = modifier.then(hit.modifier)
+  val layoutCallback: (androidx.compose.ui.text.TextLayoutResult) -> Unit = {
+    hit.onTextLayout(it)
+    onTextLayout?.invoke(it)
+  }
 
   if (mathSegments.isEmpty()) {
     Text(
-      text = annotated,
-      style = inlineStyles.baseCallout,
+      text = styled,
+      style = style,
       color = textColor,
-      modifier = anchor?.modifier ?: Modifier,
-      onTextLayout = anchor?.onTextLayout ?: {},
+      modifier = targetModifier,
+      onTextLayout = layoutCallback,
     )
     return
   }
 
-  val layouts = mathSegments.map { segment -> rememberInlineChatMath(segment.latex, 16.sp, textColor) }
+  val density = LocalDensity.current
+  val maxWidthPx = mathMaxWidth?.let { with(density) { it.toPx() } }
+  val mathSize = style.fontSize.takeOrElse { 16.sp }
+  val layouts = mathSegments.map { segment -> rememberInlineChatMath(segment.latex, mathSize, textColor) }
   val resolved = mathSegments.mapIndexedNotNull { index, segment -> layouts[index]?.let { segment.latex to it } }.toMap()
-  val inlineContent = resolved.mapValues { (_, layout) -> layout.asInlineMathContent() }
+  val inlineContent = resolved.mapValues { (_, layout) -> layout.asInlineMathContent(maxWidthPx) }
   val literal =
     buildAnnotatedString {
       segments.forEach { segment ->
         when (segment) {
-          is InlineLatexSegment.Text -> append(segment.text)
+          is InlineLatexSegment.Text -> append(styled.subSequence(segment.start, segment.end))
           is InlineLatexSegment.Math -> {
             if (resolved.containsKey(segment.latex)) {
-              appendInlineContent(segment.latex, "\$" + segment.latex + "\$")
+              appendInlineContent(segment.latex, segment.latex)
             } else {
               // Not resolved yet (or failed): keep the source visible so the sentence
-              // never collapses while the renderer catches up.
-              append("\$" + segment.latex + "\$")
+              // never collapses while the renderer catches up. The delimiters stay out
+              // of the prose.
+              append(segment.latex)
             }
           }
         }
@@ -497,11 +639,11 @@ private fun RenderInlineMarkdownRange(
 
   Text(
     text = literal,
-    style = inlineStyles.baseCallout,
+    style = style,
     color = textColor,
     inlineContent = inlineContent,
-    modifier = anchor?.modifier ?: Modifier,
-    onTextLayout = anchor?.onTextLayout ?: {},
+    modifier = targetModifier,
+    onTextLayout = layoutCallback,
   )
 }
 
@@ -509,12 +651,20 @@ private fun RenderInlineMarkdownRange(
  * Wraps a laid-out expression as inline content. The TeX box is already sized in
  * device pixels for the font size it was laid out at, so it converts straight to
  * `sp` and stays aligned with the words around it at any surrounding style size.
+ * A table cell passes [maxWidthPx] so an oversized matrix shrinks to the cell
+ * instead of spilling into its neighbour.
  */
 @Composable
-private fun ChatMathLayout.asInlineMathContent(): InlineTextContent {
+private fun ChatMathLayout.asInlineMathContent(maxWidthPx: Float? = null): InlineTextContent {
   val density = LocalDensity.current
-  val width = with(density) { widthPx.toFloat().toDp().toSp() }
-  val height = with(density) { heightPx.toFloat().toDp().toSp() }
+  val scale =
+    if (maxWidthPx != null && maxWidthPx > 0f && widthPx > maxWidthPx) {
+      (maxWidthPx / widthPx).coerceIn(0.1f, 1f)
+    } else {
+      1f
+    }
+  val width = with(density) { (widthPx * scale).toDp().toSp() }
+  val height = with(density) { (heightPx * scale).toDp().toSp() }
   return InlineTextContent(
     Placeholder(
       width = width,
@@ -522,7 +672,7 @@ private fun ChatMathLayout.asInlineMathContent(): InlineTextContent {
       placeholderVerticalAlign = PlaceholderVerticalAlign.Center,
     ),
   ) {
-    ChatMathCanvas(this@asInlineMathContent)
+    ChatMathCanvas(this@asInlineMathContent, scale = scale)
   }
 }
 
@@ -607,6 +757,7 @@ private fun RenderListItem(
     marker = if (task.isChecked) "☑" else "☐"
     contentStart = task.next
   }
+  val markerHit = rememberChatTextHitTarget()
 
   Row(
     modifier = Modifier.fillMaxWidth(),
@@ -617,7 +768,8 @@ private fun RenderListItem(
       text = marker,
       style = inlineStyles.baseCallout.copy(fontWeight = FontWeight.SemiBold),
       color = textColor,
-      modifier = Modifier.width(24.dp),
+      modifier = Modifier.width(24.dp).then(markerHit.modifier),
+      onTextLayout = markerHit::onTextLayout,
     )
 
     Column(
@@ -647,36 +799,103 @@ private fun RenderTableBlock(
 
   val maxCols = rows.maxOf { row -> row.cells.size }.coerceAtLeast(1)
   val scrollState = rememberScrollState()
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  val colors = ClawTheme.colors
+  val cardShape = RoundedCornerShape(16.dp)
+  val separatorColor = colors.border.copy(alpha = 0.85f)
+  val tableMarkdown = remember(rows) { chatTableMarkdown(rows, maxCols) }
+  val tableCsv = remember(rows) { chatTableCsv(rows, maxCols) }
 
-  Column(
-    modifier =
-      Modifier
-        .fillMaxWidth()
-        .horizontalScroll(scrollState)
-        .border(1.dp, ClawTheme.colors.textMuted.copy(alpha = 0.25f)),
-  ) {
-    for (row in rows) {
-      Row(
-        modifier = Modifier.fillMaxWidth(),
+  BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+    // Columns split the available width by their longest cell, with a floor so
+    // wide tables keep readable cells and scroll horizontally instead.
+    val columnWidths = chatTableColumnWidths(rows, maxCols, maxWidth)
+    val tableWidth = columnWidths.fold(0.dp) { total, width -> total + width }
+    Box(modifier = Modifier.fillMaxWidth().horizontalScroll(scrollState)) {
+      Column(
+        modifier =
+          Modifier
+            .width(tableWidth)
+            .clip(cardShape)
+            .background(colors.surface)
+            .border(1.dp, colors.border, cardShape),
       ) {
-        for (index in 0 until maxCols) {
-          val cell = row.cells.getOrNull(index) ?: AnnotatedString("")
-          val anchor = rememberChatReaderAnchor()
-          val cellStyle =
-            if (row.isHeader) ClawTheme.type.caption.copy(fontWeight = FontWeight.SemiBold) else inlineStyles.baseCallout
-          // Cells carry inline math constantly (condition tables), so they get the
-          // same inline renderer the paragraph path uses.
-          RenderTableText(
-            text = cell,
-            style = cellStyle,
-            textColor = textColor,
-            modifier =
-              Modifier
-                .then(anchor?.modifier ?: Modifier)
-                .border(1.dp, ClawTheme.colors.textMuted.copy(alpha = 0.22f))
-                .padding(horizontal = 8.dp, vertical = 6.dp)
-                .width(160.dp),
-            onTextLayout = anchor?.onTextLayout ?: {},
+        rows.forEachIndexed { rowIndex, row ->
+          // Intrinsic height makes every cell in a row share the row's box;
+          // otherwise a tall formula cell left its neighbours with shorter cells.
+          Row(modifier = Modifier.height(IntrinsicSize.Min)) {
+            for (index in 0 until maxCols) {
+              val cell = row.cells.getOrNull(index) ?: AnnotatedString("")
+              val anchor = rememberChatReaderAnchor()
+              val cellStyle =
+                if (row.isHeader) ClawTheme.type.section else inlineStyles.baseCallout
+              Box(
+                modifier =
+                  Modifier
+                    .then(anchor?.modifier ?: Modifier)
+                    .width(columnWidths[index])
+                    .fillMaxHeight()
+                    .background(if (row.isHeader) colors.surfacePressed else Color.Transparent)
+                    .drawBehind {
+                      if (index > 0) {
+                        drawLine(
+                          color = separatorColor,
+                          start = Offset(0f, 0f),
+                          end = Offset(0f, size.height),
+                          strokeWidth = 0.75.dp.toPx(),
+                        )
+                      }
+                    }
+                    .padding(horizontal = 14.dp, vertical = 11.dp),
+              ) {
+                // Cells carry inline math constantly (condition tables), so they get
+                // the same inline renderer the paragraph path uses.
+                RenderChatInlineText(
+                  text = cell,
+                  style = cellStyle,
+                  textColor = textColor,
+                  modifier = Modifier.fillMaxWidth(),
+                  mathMaxWidth = (columnWidths[index] - 28.dp).coerceAtLeast(24.dp),
+                  onTextLayout = anchor?.onTextLayout,
+                )
+              }
+            }
+          }
+          if (rowIndex != rows.lastIndex) {
+            Box(Modifier.fillMaxWidth().height(0.75.dp).background(separatorColor))
+          }
+        }
+        Box(Modifier.fillMaxWidth().height(0.75.dp).background(separatorColor))
+        Row(
+          modifier =
+            Modifier
+              .fillMaxWidth()
+              .background(colors.surface)
+              .padding(horizontal = 4.dp, vertical = 1.dp),
+          horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.End),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          ClawPlainIconButton(
+            icon = MiuixIcons.Medium.MiuixCopy,
+            contentDescription = "复制表格",
+            onClick = { copyChatText(context, tableMarkdown, toastLabel = "表格已复制") },
+            modifier = Modifier.size(34.dp),
+          )
+          ClawPlainIconButton(
+            icon = MiuixIcons.Medium.MiuixDownload,
+            contentDescription = "下载表格",
+            onClick = {
+              scope.launch {
+                val saved = runCatching { saveChatTableCsv(context, tableCsv) }.isSuccess
+                Toast.makeText(
+                  context,
+                  if (saved) "表格已保存到下载" else "表格保存失败",
+                  Toast.LENGTH_SHORT,
+                ).show()
+              }
+            },
+            modifier = Modifier.size(34.dp),
           )
         }
       }
@@ -684,55 +903,76 @@ private fun RenderTableBlock(
   }
 }
 
-/** Renders one table cell, inlining LaTeX where the cell text contains `$...$`. */
-@Composable
-private fun RenderTableText(
-  text: AnnotatedString,
-  style: TextStyle,
-  textColor: Color,
-  modifier: Modifier,
-  onTextLayout: (androidx.compose.ui.text.TextLayoutResult) -> Unit,
-) {
-  val mathSegments =
-    remember(text.text) {
-      if (text.text.contains('$')) {
-        splitInlineLatex(text.text).filterIsInstance<InlineLatexSegment.Math>()
-      } else {
-        emptyList()
-      }
+private val chatTableMinColumnWidth = 96.dp
+
+/**
+ * Every column starts at the readable floor; leftover width is then shared by
+ * how much text each column carries. A table whose floors already exceed the
+ * bubble keeps those widths and scrolls horizontally.
+ */
+private fun chatTableColumnWidths(
+  rows: List<TableRenderRow>,
+  maxCols: Int,
+  availableWidth: Dp,
+): List<Dp> {
+  if (maxCols <= 0) return emptyList()
+  val floor = chatTableMinColumnWidth.value
+  val available = availableWidth.value
+  if (floor * maxCols >= available) return List(maxCols) { floor.dp }
+  val weights =
+    (0 until maxCols).map { index ->
+      val longest = rows.maxOfOrNull { row -> row.cells.getOrNull(index)?.text?.length ?: 0 } ?: 0
+      longest.coerceIn(4, 64).toFloat()
     }
-  if (mathSegments.isEmpty()) {
-    Text(text = text, style = style, color = textColor, modifier = modifier, onTextLayout = onTextLayout)
-    return
+  val totalWeight = weights.sum().takeIf { it > 0f } ?: maxCols.toFloat()
+  val extra = available - floor * maxCols
+  return weights.map { weight -> (floor + extra * weight / totalWeight).dp }
+}
+
+private fun chatTableMarkdown(
+  rows: List<TableRenderRow>,
+  maxCols: Int,
+): String {
+  val headerRows = rows.filter { it.isHeader }.ifEmpty { listOf(rows.first()) }
+  val bodyRows = rows.drop(headerRows.size)
+  return buildString {
+    headerRows.forEach { append(chatTableMarkdownRow(it, maxCols)).append('\n') }
+    append("| ").append(List(maxCols) { "---" }.joinToString(" | ")).append(" |\n")
+    bodyRows.forEach { append(chatTableMarkdownRow(it, maxCols)).append('\n') }
+  }.trimEnd()
+}
+
+private fun chatTableMarkdownRow(
+  row: TableRenderRow,
+  maxCols: Int,
+): String =
+  (0 until maxCols).joinToString(" | ", prefix = "| ", postfix = " |") { index ->
+    row.cells.getOrNull(index)?.text.orEmpty().replace("\n", "<br>").replace("|", "\\|")
   }
 
-  val layouts = mathSegments.map { segment -> rememberInlineChatMath(segment.latex, 14.sp, textColor) }
-  val resolved = mathSegments.mapIndexedNotNull { index, segment -> layouts[index]?.let { segment.latex to it } }.toMap()
-  val inlineContent = resolved.mapValues { (_, layout) -> layout.asInlineMathContent() }
-  val literal =
-    buildAnnotatedString {
-      splitInlineLatex(text.text).forEach { segment ->
-        when (segment) {
-          is InlineLatexSegment.Text -> append(segment.text)
-          is InlineLatexSegment.Math -> {
-            if (resolved.containsKey(segment.latex)) {
-              appendInlineContent(segment.latex, "\$" + segment.latex + "\$")
-            } else {
-              append("\$" + segment.latex + "\$")
-            }
-          }
-        }
+private fun chatTableCsv(
+  rows: List<TableRenderRow>,
+  maxCols: Int,
+): String =
+  buildString {
+    // Excel needs the BOM to read UTF-8 Chinese correctly.
+    append('\uFEFF')
+    rows.forEach { row ->
+      for (index in 0 until maxCols) {
+        if (index > 0) append(',')
+        append(chatTableCsvField(row.cells.getOrNull(index)?.text.orEmpty()))
       }
+      append("\r\n")
     }
+  }
 
-  Text(
-    text = literal,
-    style = style,
-    color = textColor,
-    inlineContent = inlineContent,
-    modifier = modifier,
-    onTextLayout = onTextLayout,
-  )
+private fun chatTableCsvField(value: String): String {
+  val normalized = value.replace("\r\n", " ").replace('\n', ' ').replace('\r', ' ')
+  return if (normalized.any { it == ',' || it == '"' }) {
+    "\"" + normalized.replace("\"", "\"\"") + "\""
+  } else {
+    normalized
+  }
 }
 
 private fun buildTableRows(

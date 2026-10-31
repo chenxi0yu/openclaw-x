@@ -9,6 +9,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.app.ServiceStartNotAllowedException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -43,8 +44,17 @@ class NodeForegroundService : Service() {
   @Volatile
   private var latestRunPhase: ChatRunActivityPhase? = null
 
+  /**
+   * Whether this process currently holds a foreground promotion.
+   *
+   * An idle transition drops it, and the next `startForegroundService()` still obliges the
+   * service to promote again within seconds — see [onStartCommand].
+   */
+  private var foregroundActive = false
+
   override fun onCreate() {
     super.onCreate()
+    running = true
     ensureChannel()
     val initial =
       buildNotification(
@@ -191,6 +201,7 @@ class NodeForegroundService : Service() {
           // reclaims it; runs and recoveries re-promote above.
           lastLiveRunPhase = null
           stopForeground(STOP_FOREGROUND_REMOVE)
+          foregroundActive = false
           runCatching { notificationManager().cancel(NOTIFICATION_ID) }
         }
       }
@@ -250,6 +261,19 @@ class NodeForegroundService : Service() {
       stopSelfResult(startId)
       return START_NOT_STICKY
     }
+    if (!foregroundActive) {
+      // `startForegroundService()` obliges the service to promote within seconds. The idle
+      // state drops the promotion, so a later notification tap (onNewIntent) restarts the
+      // service that is already created and its collector finds "idle" again — without this
+      // promotion the platform raised ForegroundServiceDidNotStartInTimeException and killed
+      // the process. The collector decides right after whether to stay or drop it again.
+      postForegroundNotification(
+        buildNotification(
+          title = nativeString("OpenClaw Node"),
+          text = nativeString("Connected"),
+        ),
+      )
+    }
     // START_STICKY recreates the service in a fresh process and calls this with a null intent.
     observeRuntime(startId)
     // Keep running; connection is managed by NodeRuntime (auto-reconnect + manual).
@@ -257,6 +281,7 @@ class NodeForegroundService : Service() {
   }
 
   override fun onDestroy() {
+    running = false
     scope.cancel()
     super.onDestroy()
   }
@@ -313,6 +338,7 @@ class NodeForegroundService : Service() {
         backgroundLocationActive = isBackgroundLocationActive(),
       )
     ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, serviceTypes)
+    foregroundActive = true
   }
 
   /**
@@ -326,6 +352,9 @@ class NodeForegroundService : Service() {
     } catch (err: Exception) {
       Log.w("OpenClawNodeService", "Foreground promotion refused; posting plain notification", err)
       runCatching { notificationManager().notify(NOTIFICATION_ID, notification) }
+      // A refused promotion leaves `startForegroundService()` unfulfilled, which the platform
+      // answers by killing the process. Closing the service is the only safe exit.
+      if (!foregroundActive) runCatching { stopSelf() }
     }
   }
 
@@ -355,6 +384,9 @@ class NodeForegroundService : Service() {
     private const val ACTION_SET_VOICE_CAPTURE_MODE = "ai.openclaw.app.action.SET_VOICE_CAPTURE_MODE"
     private const val EXTRA_VOICE_CAPTURE_MODE = "ai.openclaw.app.extra.VOICE_CAPTURE_MODE"
 
+    // Same-process service presence: a stopped service has no notification to update.
+    @Volatile private var running = false
+
     fun start(context: Context) {
       if (!(context.applicationContext as NodeApp).nodeServiceStartAllowed) return
       val intent = Intent(context, NodeForegroundService::class.java)
@@ -383,15 +415,25 @@ class NodeForegroundService : Service() {
       mode: VoiceCaptureMode,
     ) {
       if (!(context.applicationContext as NodeApp).nodeServiceStartAllowed) return
+      // Off is notification bookkeeping: a stopped service has nothing to update, and
+      // starting it from the deferred onStop of a frozen background process is illegal
+      // (BackgroundServiceStartNotAllowedException escapes the activity lifecycle).
+      if (mode == VoiceCaptureMode.Off && !running) return
       val intent =
         Intent(context, NodeForegroundService::class.java)
           .setAction(ACTION_SET_VOICE_CAPTURE_MODE)
           .putExtra(EXTRA_VOICE_CAPTURE_MODE, mode.name)
-      if (mode == VoiceCaptureMode.TalkMode) {
-        // Microphone foreground service type must be declared before Talk capture starts.
-        ContextCompat.startForegroundService(context, intent)
-      } else {
-        context.startService(intent)
+      try {
+        if (mode == VoiceCaptureMode.TalkMode) {
+          // Microphone foreground service type must be declared before Talk capture starts.
+          ContextCompat.startForegroundService(context, intent)
+        } else {
+          context.startService(intent)
+        }
+      } catch (err: ServiceStartNotAllowedException) {
+        // The runtime already owns the new mode; a refused start only skips a
+        // notification repaint that the next service run re-derives from the flow.
+        Log.w("OpenClawNodeService", "Voice capture mode update refused in background", err)
       }
     }
   }

@@ -1047,8 +1047,7 @@ class NodeRuntimeAgentSelectionTest {
         }
         val catalogCreation =
           if (catalogId == null) {
-            runtime.startNewChat()
-            null
+            async { runtime.startNewChatAwait() }
           } else {
             async { runtime.createSessionCatalogEntry(catalogId) }
           }
@@ -1068,7 +1067,7 @@ class NodeRuntimeAgentSelectionTest {
         }
 
         assertEquals(createdKey, runtime.chatSessionKey.value)
-        catalogCreation?.let { assertTrue(it.await()) }
+        assertTrue(catalogCreation.await())
       } finally {
         releaseLookup.complete(Unit)
         releaseCreate.complete(Unit)
@@ -1154,8 +1153,7 @@ class NodeRuntimeAgentSelectionTest {
 
       val catalogCreation =
         if (catalogId == null) {
-          runtime.startNewChat()
-          null
+          async { runtime.startNewChatAwait() }
         } else {
           async { runtime.createSessionCatalogEntry(catalogId) }
         }
@@ -1165,7 +1163,7 @@ class NodeRuntimeAgentSelectionTest {
         assertFalse("Creation must still be waiting for its initial history", createJob.isCompleted)
       } else {
         withTimeout(5_000) { createJob.join() }
-        catalogCreation?.let { assertTrue(it.await()) }
+        assertTrue(catalogCreation.await())
       }
       assertEquals(createdKey, runtime.chatSessionKey.value)
 

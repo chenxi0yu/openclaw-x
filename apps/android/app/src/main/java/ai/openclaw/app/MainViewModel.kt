@@ -32,6 +32,7 @@ import ai.openclaw.app.gateway.GatewayUpdateAvailableSummary
 import ai.openclaw.app.systemagent.SystemAgentChatState
 import ai.openclaw.app.update.AppUpdateCheck
 import ai.openclaw.app.update.AppUpdateRelease
+import ai.openclaw.app.update.AppUpdateSource
 import ai.openclaw.app.update.AppUpdateUiState
 import ai.openclaw.app.update.checkForAppUpdate
 import ai.openclaw.app.ui.GatewayConnectPlan
@@ -39,6 +40,7 @@ import ai.openclaw.app.ui.GatewaySavedAuthAction
 import ai.openclaw.app.ui.SettingsRoute
 import ai.openclaw.app.ui.chat.ChatComposerSendStartResult
 import ai.openclaw.app.ui.chat.ChatComposerStateStore
+import ai.openclaw.app.ui.chat.ChatQuoteDraft
 import ai.openclaw.app.ui.chat.PendingAttachment
 import ai.openclaw.app.ui.chat.chatComposerTextDraftsFromSnapshot
 import ai.openclaw.app.ui.chat.matchesSession
@@ -64,6 +66,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
@@ -73,6 +76,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
@@ -616,9 +620,8 @@ class MainViewModel private constructor(
   val appearanceAccentArgb: StateFlow<Long?> = prefs.appearanceAccentArgb
   val appearanceTextScale: StateFlow<Float> = prefs.appearanceTextScale
   val hapticsEnabled: StateFlow<Boolean> = prefs.hapticsEnabled
-  val appUpdateRepository: StateFlow<String> = prefs.appUpdateRepository
+  internal val appUpdateSource: StateFlow<AppUpdateSource> = prefs.appUpdateSource
   val appUpdateAutoCheck: StateFlow<Boolean> = prefs.appUpdateAutoCheck
-  val appUpdateLinkPattern: StateFlow<String> = prefs.appUpdateLinkPattern
 
   // ---- App update checks -------------------------------------------------------------
   // One mutable state owns the whole check surface so the settings page and the
@@ -634,16 +637,19 @@ class MainViewModel private constructor(
 
   private var appUpdateCheckJob: Job? = null
 
-  fun setAppUpdateRepository(value: String) {
-    prefs.setAppUpdateRepository(value)
+  internal fun setAppUpdateSource(source: AppUpdateSource) {
+    if (prefs.appUpdateSource.value == source) return
+    prefs.setAppUpdateSource(source)
+    // A release found on the previous mirror must not keep prompting after the
+    // user deliberately switched away from it; the next check starts clean.
+    appUpdateCheckJob?.cancel()
+    appUpdateCheckJob = null
+    appUpdatePromptMutable.value = null
+    appUpdateMutable.value = AppUpdateUiState()
   }
 
   fun setAppUpdateAutoCheck(enabled: Boolean) {
     prefs.setAppUpdateAutoCheck(enabled)
-  }
-
-  fun setAppUpdateLinkPattern(value: String) {
-    prefs.setAppUpdateLinkPattern(value)
   }
 
   /**
@@ -657,13 +663,19 @@ class MainViewModel private constructor(
     if (appUpdateCheckJob?.isActive == true) return
     appUpdateCheckJob =
       viewModelScope.launch {
+        val source = prefs.appUpdateSource.value
         appUpdateMutable.update { it.copy(checking = true) }
         val outcome =
           checkForAppUpdate(
-            repository = prefs.appUpdateRepository.value,
+            source = source,
             currentVersion = BuildConfig.VERSION_NAME,
-            linkPattern = prefs.appUpdateLinkPattern.value,
           )
+        if (prefs.appUpdateSource.value != source) {
+          // The user switched mirrors while this request was in flight; the
+          // answer belongs to a source they no longer chose.
+          appUpdateMutable.update { it.copy(checking = false) }
+          return@launch
+        }
         when (outcome) {
           is AppUpdateCheck.Available -> {
             appUpdatePromptMutable.value = outcome.release
@@ -732,6 +744,7 @@ class MainViewModel private constructor(
   val chatQuestions: StateFlow<List<ChatQuestionPrompt>> = runtimeState(initial = emptyList()) { it.chatQuestions }
   val chatProgressCard: StateFlow<ChatProgressCard?> = runtimeState(initial = null) { it.chatProgressCard }
   val chatSessions: StateFlow<List<ChatSessionEntry>> = runtimeState(initial = emptyList()) { it.chatSessions }
+  val chatLocalNewChatDraft: StateFlow<Boolean> = runtimeState(initial = false) { it.chatLocalNewChatDraft }
   val chatSwarmGroups: StateFlow<List<ChatSwarmGroup>> = runtimeState(initial = emptyList()) { it.chatSwarmGroups }
   val chatSessionBranches: StateFlow<List<SessionBranch>> = runtimeState(initial = emptyList()) { it.chatSessionBranches }
   val chatSessionBranchesLoading: StateFlow<Boolean> = runtimeState(initial = false) { it.chatSessionBranchesLoading }
@@ -1180,13 +1193,13 @@ class MainViewModel private constructor(
     }
   }
 
-  internal fun setChatReplyDraft(
-    value: String,
+  internal fun setChatQuoteDraft(
+    quote: ChatQuoteDraft?,
     owner: ChatComposerOwner,
   ) {
     if (!isCurrentChatComposerOwner(owner)) return
     pendingAssistantAutoSendMutable.value = null
-    setChatDraft(ChatDraft(text = value, placement = ChatDraftPlacement.BeforeExisting, owner = owner))
+    chatComposerState.setQuote(owner, quote)
   }
 
   /** Claims an assistant prompt before sending so Compose effect restarts cannot dispatch it twice. */
@@ -1253,6 +1266,43 @@ class MainViewModel private constructor(
         }
       }
     }
+  }
+
+  val chatLiveTalkVisible: StateFlow<Boolean> = prefs.chatLiveTalkVisible
+  val chatVoiceInputVisible: StateFlow<Boolean> = prefs.chatVoiceInputVisible
+  val composerBarStyle: StateFlow<ComposerBarStyle> = prefs.composerBarStyle
+  val releaseIntroSeenVersion: StateFlow<String?> = prefs.releaseIntroSeenVersion
+
+  // One-shot: the release intro's "马上体验" lands on 外观 › 输入栏. The Appearance
+  // screen owns that sub-page, so it consumes this request itself.
+  private val composerBarSettingsRequestState = MutableStateFlow(false)
+  internal val composerBarSettingsRequest: StateFlow<Boolean> get() = composerBarSettingsRequestState
+
+  fun requestComposerBarSettings() {
+    composerBarSettingsRequestState.value = true
+  }
+
+  internal fun clearComposerBarSettingsRequest() {
+    composerBarSettingsRequestState.value = false
+  }
+
+  fun markReleaseIntroSeen(version: String = BuildConfig.VERSION_NAME) {
+    prefs.setReleaseIntroSeenVersion(version)
+  }
+
+  fun setChatLiveTalkVisible(enabled: Boolean) {
+    prefs.setChatLiveTalkVisible(enabled)
+    // Hiding the control must not strand an active live-talk session with no way
+    // to end it from the composer.
+    if (!enabled) setTalkModeEnabled(false)
+  }
+
+  fun setChatVoiceInputVisible(enabled: Boolean) {
+    prefs.setChatVoiceInputVisible(enabled)
+  }
+
+  fun setComposerBarStyle(style: ComposerBarStyle) {
+    prefs.setComposerBarStyle(style)
   }
 
   fun setTalkModeEnabled(enabled: Boolean) {
@@ -1360,6 +1410,74 @@ class MainViewModel private constructor(
   fun setAppearanceTextScale(scale: Float) {
     prefs.setAppearanceTextScale(scale)
   }
+
+  val appearanceStartupPage: StateFlow<AppearanceStartupPage> = prefs.appearanceStartupPage
+
+  /**
+   * True only on a process start configured to land on a fresh chat. It keeps the
+   * startup mask up until the local draft is applied, so the old conversation is
+   * never painted first and does not visibly jump into a new one.
+   */
+  private val _startupNewChatPending =
+    MutableStateFlow(prefs.appearanceStartupPage.value == AppearanceStartupPage.NewChat)
+  val startupNewChatPending: StateFlow<Boolean> = _startupNewChatPending
+
+  fun completeStartupNewChat() {
+    _startupNewChatPending.value = false
+  }
+
+  /**
+   * Applies the startup "new chat" draft: the transcript is blanked locally and no
+   * gateway session is created — the first send creates it, so no device ever lists
+   * an empty conversation. The empty draft an older build created is deleted.
+   */
+  fun startLocalNewChatDraft() {
+    ensureRuntime().beginLocalNewChat()
+    completeStartupNewChat()
+    cleanupStaleStartupDraftSession()
+  }
+
+  /** Deletes the empty gateway draft an older build left behind, then clears its key. */
+  private fun cleanupStaleStartupDraftSession() {
+    val staleKey = prefs.startupNewChatDraftKey ?: return
+    viewModelScope.launch {
+      try {
+        ensureRuntime()
+        // The session rows only exist once the gateway connects and answers
+        // sessions.list; give that a bounded window, then give up for this launch.
+        val rows = withTimeoutOrNull(20_000) { chatSessions.first { it.isNotEmpty() } } ?: return@launch
+        val row = rows.firstOrNull { it.key == staleKey }
+        if (row == null) {
+          // The list is loaded and the draft is already gone.
+          prefs.clearStartupNewChatDraftKey()
+          return@launch
+        }
+        deleteChatSession(key = row.key, ownerAgentId = row.ownerAgentId, sessionId = row.sessionId)
+        prefs.clearStartupNewChatDraftKey()
+      } catch (err: CancellationException) {
+        throw err
+      } catch (_: Throwable) {
+        // Keep the key so a later launch can retry the deletion.
+      }
+    }
+  }
+
+  fun setAppearanceStartupPage(page: AppearanceStartupPage) {
+    prefs.setAppearanceStartupPage(page)
+  }
+
+  fun rememberShellLocation(
+    tab: String,
+    settingsRoute: String,
+  ) {
+    prefs.rememberShellLocation(tab = tab, settingsRoute = settingsRoute)
+  }
+
+  val lastShellTab: String
+    get() = prefs.lastShellTab
+
+  val lastShellSettingsRoute: String
+    get() = prefs.lastShellSettingsRoute
 
   /** Device-local touch feedback switch; never synced to the gateway appearance profile. */
   fun setHapticsEnabled(enabled: Boolean) {

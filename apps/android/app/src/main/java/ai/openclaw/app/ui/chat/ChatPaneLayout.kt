@@ -40,6 +40,12 @@ internal fun ChatPaneLayout(
   bodyModifier: Modifier = Modifier,
   /** Full-pane layer the header glass and the morph menu sample (Backdrop source). */
   backdropSourceModifier: Modifier = Modifier,
+  /**
+   * Space between the pane's bottom edge and the composer's float gap. The
+   * classic bar keeps the old 10dp; a caller that knows the system gesture bar
+   * passes it so the floating bar never fights the pill.
+   */
+  composerBottomInset: Dp = 10.dp,
   header: @Composable (compact: Boolean, tabletop: Boolean) -> Unit,
   /**
    * Receives the height (plus gap) the header occupies so the caller can turn it
@@ -55,6 +61,7 @@ internal fun ChatPaneLayout(
     val width = constraints.maxWidth
     val height = constraints.maxHeight
     val padding = 10.dp.roundToPx()
+    val composerBottomGap = 4.dp.roundToPx()
     val gap = 8.dp.roundToPx()
     val inputFloor = minimumInputHeight.roundToPx()
     val headerFloor = minimumHeaderHeight.roundToPx()
@@ -121,14 +128,26 @@ internal fun ChatPaneLayout(
               Box(Modifier.clipToBounds().verticalScroll(rememberScrollState())) {
                 if (tabletop) Column { status() }
               }
-              Box(Modifier.clipToBounds()) { composer(compact, tabletop) }
+              // No clipToBounds here: press-drag swell, the glass shadows and
+              // the morph growth all draw past the composer's slot, and clipping
+              // them truncated the bar exactly like the header never is.
+              Box { composer(compact, tabletop) }
             },
           ) { measurables, _ ->
+            // The classic bar keeps the pane's own `inset` float; a style that
+            // floats on the system gesture bar reports it through
+            // [composerBottomInset], which replaces `inset` for the composer only.
+            val composerFloatPx =
+              when {
+                tabletop -> inset
+                compact -> 0
+                else -> composerBottomInset.roundToPx()
+              }
             val composerLimit =
               if (tabletop) {
                 lowerAvailable
               } else {
-                (lowerAvailable - headerReservePx - spacing).coerceAtLeast(0)
+                (lowerAvailable - headerReservePx - spacing + inset - composerFloatPx).coerceAtLeast(0)
               }
             val composerPlaceable =
               measurables[2].measure(
@@ -153,10 +172,13 @@ internal fun ChatPaneLayout(
                 ),
               )
             val statusGap = if (statusPlaceable.height > 0) spacing else 0
+            // The glass composer floats above the transcript, so the reader
+            // must reach the pane's bottom edge: otherwise the empty strip the
+            // old reserve left behind samples as flat canvas inside the glass.
             val readerHeight =
               (
-                upperHeight - headerReservePx - statusPlaceable.height - statusGap -
-                  if (tabletop) 0 else spacing
+                upperHeight + (if (tabletop) 0 else inset) -
+                  headerReservePx - statusPlaceable.height - statusGap
               ).coerceAtLeast(0)
             val readerPlaceable =
               measurables[0].measure(
@@ -165,7 +187,10 @@ internal fun ChatPaneLayout(
             layout(width, height) {
               readerPlaceable.place(upperBounds.left, upperBounds.top + inset)
               statusPlaceable.place(upperBounds.left, upperBounds.bottom - inset - statusPlaceable.height)
-              composerPlaceable.place(lowerBounds.left, lowerBounds.bottom - inset - composerPlaceable.height)
+              composerPlaceable.place(
+                lowerBounds.left,
+                lowerBounds.bottom - composerFloatPx - (if (tabletop) 0 else composerBottomGap) - composerPlaceable.height,
+              )
             }
           }
         }.single().measure(Constraints.fixed(width, height))

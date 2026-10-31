@@ -4,6 +4,7 @@ import ai.openclaw.app.chat.ChatComposerOwner
 import ai.openclaw.app.gateway.GatewayRegistryEntry
 import ai.openclaw.app.gateway.GatewayRegistryEntryKind
 import ai.openclaw.app.ui.chat.ChatComposerStateStore
+import ai.openclaw.app.ui.chat.ChatQuoteDraft
 import ai.openclaw.app.ui.chat.PendingAttachment
 import android.content.Context
 import android.content.Intent
@@ -411,7 +412,7 @@ class MainViewModelTest {
     }
 
   @Test
-  fun replyDraftRejectsACallbackCapturedForAnotherChat() {
+  fun quoteDraftRejectsACallbackCapturedForAnotherChat() {
     val (viewModel, _) = createViewModel()
     viewModel.handleAssistantLaunch(
       AssistantLaunchRequest(
@@ -422,11 +423,11 @@ class MainViewModelTest {
     )
     val owner = requireNotNull(viewModel.chatDraft.value?.owner)
 
-    viewModel.setChatReplyDraft("quoted", owner)
-    assertEquals("quoted", viewModel.chatDraft.value?.text)
+    viewModel.setChatQuoteDraft(ChatQuoteDraft("quoted"), owner)
+    assertEquals("quoted", viewModel.chatComposerState.quoteDrafts[owner]?.body)
 
-    viewModel.setChatReplyDraft("stale", owner.copy(sessionKey = "agent:main:another"))
-    assertEquals("quoted", viewModel.chatDraft.value?.text)
+    viewModel.setChatQuoteDraft(ChatQuoteDraft("stale"), owner.copy(sessionKey = "agent:main:another"))
+    assertEquals("quoted", viewModel.chatComposerState.quoteDrafts[owner]?.body)
   }
 
   private fun assertNodeServiceStopRequested() {

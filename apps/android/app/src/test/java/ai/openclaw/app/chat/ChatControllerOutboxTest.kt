@@ -26,6 +26,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -2241,7 +2242,7 @@ class ChatControllerOutboxTest {
 
       // A missing sessions.create key reloads the current parent. It is a history generation,
       // not a composer-owner change, so the suspended send still owns this UI.
-      assertTrue(chat.startNewChatAwait())
+      assertNotNull(chat.startNewChatAwait())
       outbox.claimGate?.complete(Unit)
       send.join()
 

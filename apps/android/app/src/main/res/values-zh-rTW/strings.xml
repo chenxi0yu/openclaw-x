@@ -1719,4 +1719,9 @@
     <string name="native_ffaed354e7fe5514" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"OpenClaw 將此手機變成簡潔的行動指令介面，可用於對話串、語音、供應商和 Gateway。"</string>
     <string name="native_ffb6f5764bddb68c" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"最新優先"</string>
     <string name="native_ffcf16006c652ee3" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"下一個週期"</string>
+    <string name="native_7d28f801df95601a" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"追問"</string>
+    <string name="native_eb4cdebd82bf1194" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"引用"</string>
+    <string name="native_68c3261b08e94f12" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"已引用前方內容"</string>
+    <string name="native_2c85efad67614491" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"移除引用"</string>
+    <string name="native_e64a6259d78c4caa" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"原訊息不在目前對話中"</string>
 </resources>

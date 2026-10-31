@@ -126,7 +126,10 @@ internal fun SidebarNavigationShell(
     ModalNavigationDrawer(
       drawerState = drawerState,
       gesturesEnabled = gesturesEnabled && edgeSwipeEnabled,
-      scrimColor = Color.Black.copy(alpha = 0.35f),
+      // The built-in scrim is hidden by the pushed content's graphics layer on
+      // this Compose version, so paint our own inset of it below; keep the
+      // built-in canvas transparent but still present for tap-to-close.
+      scrimColor = Color.Transparent,
       drawerContent = {
         ModalDrawerSheet(
           modifier = Modifier.width(SidebarDrawerMaxWidth),
@@ -141,17 +144,32 @@ internal fun SidebarNavigationShell(
     ) {
       // Content wrapper: pushed right by drawer offset
       val offset = drawerState.currentOffset // negative px when closed, 0 when open
-      Box(
-        modifier = Modifier
-          .fillMaxSize()
-          .graphicsLayer {
-            // offset goes from -drawerWidthPx (closed) to 0 (open)
-            // We want content translationX: 0 (closed) → drawerWidthPx (open)
-            translationX = drawerWidthPx + offset
-          }
-          .clipToBounds(),
-      ) {
-        Box(Modifier.fillMaxSize()) { content() }
+      Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+          modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer {
+              // offset goes from -drawerWidthPx (closed) to 0 (open)
+              // We want content translationX: 0 (closed) → drawerWidthPx (open)
+              translationX = drawerWidthPx + offset
+            }
+            .clipToBounds(),
+        ) {
+          Box(Modifier.fillMaxSize()) { content() }
+        }
+        // Scrim above the pushed page but still under the drawer sheet. The
+        // fraction follows the same offset that drives the push, so the dim
+        // appears and disappears with the drawer rather than after it.
+        Box(
+          modifier =
+            Modifier
+              .fillMaxSize()
+              .graphicsLayer {
+                val fraction = ((drawerState.currentOffset + drawerWidthPx) / drawerWidthPx).coerceIn(0f, 1f)
+                alpha = 0.35f * fraction
+              }
+              .background(Color.Black),
+        )
       }
     }
   }

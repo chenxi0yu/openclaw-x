@@ -1,25 +1,55 @@
 package ai.openclaw.app.update
 
 import ai.openclaw.app.ui.image.executeCancellable
-import ai.openclaw.app.ui.image.isPubliclyRoutableHost
 import ai.openclaw.app.ui.image.safePublicHttpClient
 import android.util.Xml
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import okhttp3.Request
 import org.xmlpull.v1.XmlPullParser
 import java.io.StringReader
 import java.util.concurrent.TimeUnit
 
 /**
- * Matches a Lanzou Cloud share link, the default distribution channel for this
- * fork's Android builds. Users who publish elsewhere replace it in Settings.
+ * Release mirror the app checks for updates.
+ *
+ * Gitee is the domestic default: its release API answers without a token and attaches the
+ * APK, so the app can queue the package on the system downloader and never leave for a
+ * netdisk. GitHub stays available as the upstream-facing mirror.
  */
-internal const val DEFAULT_APP_UPDATE_LINK_PATTERN = "https?://[A-Za-z0-9.-]*lanzou[A-Za-z0-9.-]*/[A-Za-z0-9_-]+"
+internal enum class AppUpdateSource(
+  val displayName: String,
+  val repository: String,
+) {
+  Gitee(displayName = "Gitee", repository = "xiaolaiddj/openclaw-x"),
+  GitHub(displayName = "GitHub", repository = "chenxi0yu/openclaw-x"),
+  ;
 
-/** Fork release repository offered as the out-of-box update source. */
-internal const val DEFAULT_APP_UPDATE_REPOSITORY = "https://github.com/chenxi0yu/openclaw-x"
+  fun releasePageUrl(tag: String): String =
+    when (this) {
+      Gitee -> "https://gitee.com/$repository/releases/tag/$tag"
+      GitHub -> "https://github.com/$repository/releases/tag/$tag"
+    }
+
+  /**
+   * GitHub's asset list for a tag: an unauthenticated HTML fragment with no request quota,
+   * same as the Atom feed. Null for Gitee, whose JSON API already carries the assets inline.
+   */
+  fun releaseAssetListUrl(tag: String): String? =
+    when (this) {
+      Gitee -> null
+      GitHub -> "https://github.com/$repository/releases/expanded_assets/$tag"
+    }
+
+  companion object {
+    /** Unknown or retired stored values fall back to the domestic mirror. */
+    fun fromStorage(raw: String?): AppUpdateSource =
+      entries.firstOrNull { it.name.equals(raw?.trim(), ignoreCase = true) } ?: Gitee
+  }
+}
 
 private const val UPDATE_CHECK_TIMEOUT_MILLIS = 12_000L
 private const val UPDATE_CHECK_MAX_BODY_BYTES = 1024 * 1024
@@ -30,27 +60,35 @@ private const val UPDATE_CHECK_MAX_BODY_BYTES = 1024 * 1024
 // feed is quota-free and still carries the release title and full notes body.
 private const val GITHUB_RELEASES_FEED = "https://github.com/%s/releases.atom"
 
-// Release notes pair the link with a share password under any of these labels; the
-// update dialog copies the password to the clipboard so the browser step is one paste.
-private val DOWNLOAD_PASSWORD_LABELS =
-  Regex(
-    "(?:密码|口令|访问码|提取码|验证码|password|passcode|code)\\s*[:：]?\\s*([A-Za-z0-9]{2,16})",
-    RegexOption.IGNORE_CASE,
-  )
+// Gitee's public OpenAPI is token-free for reads and returns the release's attached
+// assets, which is what makes a direct APK download possible without a netdisk.
+private const val GITEE_LATEST_RELEASE_API = "https://gitee.com/api/v5/repos/%s/releases/latest"
+
+// GitHub's asset fragment is quota-free like the feed and is the only token-free way to learn
+// a release's attachment names: the Atom body carries no asset list. Anchoring on
+// `/releases/download/` also ignores the CDN `<link>`s of the full page GitHub serves back
+// when a tag has no assets, which carry no filename at all.
+private val githubApkAssetHref = Regex("href=\"(/[^\"]*?/releases/download/[^\"]+?\\.apk)\"", RegexOption.IGNORE_CASE)
 
 /** A published release the app can offer to install. */
 internal data class AppUpdateRelease(
   val version: String,
   val tag: String,
   val title: String,
+  /**
+   * Release body in the shape the dialog's Markdown renderer consumes: Gitee's JSON API
+   * returns the authored Markdown and is passed through untouched, while GitHub's Atom body
+   * is HTML that no token-free endpoint serves as Markdown, so it arrives normalized to text.
+   */
   val notes: String,
+  /** The release's own APK attachment; null when the release carries none. */
   val downloadUrl: String?,
-  val downloadPassword: String?,
+  /** Always set: the release page is the fallback when no attachment was found. */
+  val pageUrl: String,
 )
 
 /** Why a check produced no release. Closed set so the UI owns every message. */
 internal enum class AppUpdateFailure {
-  InvalidRepository,
   Network,
   UnexpectedResponse,
   NoReleases,
@@ -76,75 +114,123 @@ internal data class AppUpdateUiState(
   val result: AppUpdateCheck? = null,
 )
 
-/**
- * Resolves any accepted repository spelling to GitHub's `owner/repo` slug.
- *
- * Accepts a full URL, a bare `github.com/owner/repo`, or `owner/repo`, with or
- * without a `.git` suffix. Returns null when the input cannot name a repository or
- * names a literal non-public host. The address is user-editable and the shared
- * client already refuses DNS answers inside private ranges, so this is the early
- * rejection that turns a bad address into a settings error instead of a timeout.
- */
-internal fun gitHubRepositorySlug(input: String): String? {
-  val trimmed = input.trim().removeSuffix("/").removeSuffix(".git").removeSuffix("/")
-  if (trimmed.isEmpty()) return null
-
-  val segments =
-    if (trimmed.contains("://") || trimmed.startsWith("github.com/")) {
-      val normalized = if (trimmed.contains("://")) trimmed else "https://$trimmed"
-      val url = normalized.toHttpUrlOrNull() ?: return null
-      if (!isPubliclyRoutableHost(url)) return null
-      url.pathSegments
-    } else {
-      trimmed.split("/")
-    }
-
-  val meaningful = segments.map { it.trim() }.filter { it.isNotEmpty() }
-  if (meaningful.size < 2) return null
-  // Trailing pair so a leading host segment and a bare slug collapse to the same answer.
-  return meaningful.takeLast(2).joinToString("/")
-}
-
 /** Transport outcome, kept apart from parsing so each failure names its own cause. */
-private sealed interface ReleaseFeedFetch {
-  data class Loaded(val xml: String) : ReleaseFeedFetch
+private sealed interface ReleaseBodyFetch {
+  data class Loaded(val body: String) : ReleaseBodyFetch
 
-  data object Unreachable : ReleaseFeedFetch
+  data object Unreachable : ReleaseBodyFetch
 
-  data object NonePublished : ReleaseFeedFetch
+  data object NonePublished : ReleaseBodyFetch
+}
+
+private sealed interface ReleaseFetch {
+  data class Loaded(val release: AppUpdateRelease) : ReleaseFetch
+
+  data object NonePublished : ReleaseFetch
+
+  data class Failed(val reason: AppUpdateFailure) : ReleaseFetch
 }
 
 /**
- * Fetches the newest published release and reports it only when it outranks the installed build.
+ * Fetches the newest published release from [source] and reports it only when it
+ * outranks the installed build.
  */
 internal suspend fun checkForAppUpdate(
-  repository: String,
+  source: AppUpdateSource,
   currentVersion: String,
-  linkPattern: String = DEFAULT_APP_UPDATE_LINK_PATTERN,
 ): AppUpdateCheck {
-  val slug = gitHubRepositorySlug(repository) ?: return AppUpdateCheck.Failed(AppUpdateFailure.InvalidRepository)
-
-  return when (val fetched = fetchReleaseFeed(slug, currentVersion)) {
-    ReleaseFeedFetch.Unreachable -> AppUpdateCheck.Failed(AppUpdateFailure.Network)
-    ReleaseFeedFetch.NonePublished -> AppUpdateCheck.Failed(AppUpdateFailure.NoReleases)
-    is ReleaseFeedFetch.Loaded -> {
-      val release = parseNewestRelease(fetched.xml, linkPattern) ?: return AppUpdateCheck.Failed(AppUpdateFailure.UnexpectedResponse)
-      if (isNewerAppVersion(release.version, currentVersion)) AppUpdateCheck.Available(release) else AppUpdateCheck.UpToDate
+  val fetched =
+    when (source) {
+      AppUpdateSource.Gitee -> fetchGiteeRelease(source, currentVersion)
+      AppUpdateSource.GitHub -> fetchGitHubRelease(source, currentVersion)
     }
+  return when (fetched) {
+    is ReleaseFetch.Loaded ->
+      if (isNewerAppVersion(fetched.release.version, currentVersion)) {
+        AppUpdateCheck.Available(fetched.release)
+      } else {
+        AppUpdateCheck.UpToDate
+      }
+
+    ReleaseFetch.NonePublished -> AppUpdateCheck.Failed(AppUpdateFailure.NoReleases)
+    is ReleaseFetch.Failed -> AppUpdateCheck.Failed(fetched.reason)
   }
 }
 
-private suspend fun fetchReleaseFeed(
-  slug: String,
+private suspend fun fetchGiteeRelease(
+  source: AppUpdateSource,
   currentVersion: String,
-): ReleaseFeedFetch {
+): ReleaseFetch {
+  val url = GITEE_LATEST_RELEASE_API.format(source.repository)
+  return when (val fetched = fetchReleaseBody(url, currentVersion, accept = "application/json")) {
+    is ReleaseBodyFetch.Loaded ->
+      parseGiteeRelease(fetched.body, source)?.let(ReleaseFetch::Loaded)
+        ?: ReleaseFetch.Failed(AppUpdateFailure.UnexpectedResponse)
+
+    ReleaseBodyFetch.NonePublished -> ReleaseFetch.NonePublished
+    ReleaseBodyFetch.Unreachable -> ReleaseFetch.Failed(AppUpdateFailure.Network)
+  }
+}
+
+private suspend fun fetchGitHubRelease(
+  source: AppUpdateSource,
+  currentVersion: String,
+): ReleaseFetch {
+  val url = GITHUB_RELEASES_FEED.format(source.repository)
+  return when (val fetched = fetchReleaseBody(url, currentVersion, accept = "application/atom+xml")) {
+    is ReleaseBodyFetch.Loaded ->
+      parseNewestRelease(fetched.body, source)
+        ?.let { release -> ReleaseFetch.Loaded(release.withAttachedApkDownload(source, currentVersion)) }
+        ?: ReleaseFetch.Failed(AppUpdateFailure.UnexpectedResponse)
+
+    ReleaseBodyFetch.NonePublished -> ReleaseFetch.NonePublished
+    ReleaseBodyFetch.Unreachable -> ReleaseFetch.Failed(AppUpdateFailure.Network)
+  }
+}
+
+/**
+ * Resolves the newest release's APK attachment so the download step can skip the browser.
+ *
+ * The Atom feed carries no asset list, so the tag's asset fragment is fetched separately.
+ * Best-effort by design: a tag with no attachment, or a host that stops serving the fragment,
+ * leaves the release on its page URL instead of failing the update check.
+ */
+private suspend fun AppUpdateRelease.withAttachedApkDownload(
+  source: AppUpdateSource,
+  currentVersion: String,
+): AppUpdateRelease {
+  val assetListUrl = source.releaseAssetListUrl(tag) ?: return this
+  val body =
+    (fetchReleaseBody(assetListUrl, currentVersion, accept = "text/html") as? ReleaseBodyFetch.Loaded)?.body
+      ?: return this
+  return copy(downloadUrl = parseGitHubApkAssetUrl(body))
+}
+
+/**
+ * Picks the release attachment to install out of GitHub's asset fragment, preferring arm64.
+ *
+ * Null when the fragment carries no `.apk` href, which is how a notes-only release and the
+ * full-page fallback GitHub serves for an asset-less tag both read.
+ */
+internal fun parseGitHubApkAssetUrl(html: String): String? {
+  val hrefs = githubApkAssetHref.findAll(html).map { match -> match.groupValues[1] }.toList()
+  if (hrefs.isEmpty()) return null
+  val preferred = hrefs.firstOrNull { it.contains("arm64", ignoreCase = true) } ?: hrefs.first()
+  return "https://github.com$preferred"
+}
+
+private suspend fun fetchReleaseBody(
+  url: String,
+  currentVersion: String,
+  accept: String,
+): ReleaseBodyFetch {
   val request =
     Request
       .Builder()
-      .url(GITHUB_RELEASES_FEED.format(slug))
-      // GitHub serves no User-Agent requests a generic error page instead of the feed.
-      .header("User-Agent", "OpenClaw-Android/$currentVersion (app-update-check)")
-      .header("Accept", "application/atom+xml")
+      .url(url)
+      // Both hosts serve a generic error page to requests without a User-Agent.
+      .header("User-Agent", "OpenClaw-X-Android/$currentVersion (app-update-check)")
+      .header("Accept", accept)
       .get()
       .build()
 
@@ -154,17 +240,87 @@ private suspend fun fetchReleaseFeed(
         .newBuilder()
         .callTimeout(UPDATE_CHECK_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
         .build()
-    val response = client.newCall(request).executeCancellable() ?: return@withContext ReleaseFeedFetch.Unreachable
+    val response = client.newCall(request).executeCancellable() ?: return@withContext ReleaseBodyFetch.Unreachable
     response.use { call ->
       when {
-        // 404 is GitHub's answer for "no such repository", which reads as nothing published.
-        call.code == 404 -> ReleaseFeedFetch.NonePublished
-        !call.isSuccessful -> ReleaseFeedFetch.Unreachable
-        call.body.contentLength() > UPDATE_CHECK_MAX_BODY_BYTES -> ReleaseFeedFetch.Unreachable
-        else -> runCatching { call.body.string() }.fold({ ReleaseFeedFetch.Loaded(it) }, { ReleaseFeedFetch.Unreachable })
+        // 404 is the API's answer for "no such repository or no published release",
+        // which reads as nothing published.
+        call.code == 404 -> ReleaseBodyFetch.NonePublished
+        !call.isSuccessful -> ReleaseBodyFetch.Unreachable
+        call.body.contentLength() > UPDATE_CHECK_MAX_BODY_BYTES -> ReleaseBodyFetch.Unreachable
+        else ->
+          runCatching { call.body.string() }.fold(
+            { body ->
+              if (body.length > UPDATE_CHECK_MAX_BODY_BYTES) {
+                ReleaseBodyFetch.Unreachable
+              } else {
+                ReleaseBodyFetch.Loaded(body)
+              }
+            },
+            { ReleaseBodyFetch.Unreachable },
+          )
       }
     }
   }
+}
+
+private val appUpdateJson = Json {
+  ignoreUnknownKeys = true
+  isLenient = true
+}
+
+@Serializable
+private data class GiteeReleasePayload(
+  @SerialName("tag_name") val tagName: String? = null,
+  val name: String? = null,
+  val body: String? = null,
+  val assets: List<GiteeAssetPayload>? = null,
+)
+
+@Serializable
+private data class GiteeAssetPayload(
+  val name: String? = null,
+  @SerialName("browser_download_url") val downloadUrl: String? = null,
+)
+
+/**
+ * Reads a Gitee release into the same shape the Atom feed produces.
+ *
+ * Only the release's own APK attachment is a download target: notes links are display text,
+ * since a share link needs interactive input the downloader cannot supply. The body stays
+ * authored Markdown so the dialog renders it instead of showing markup.
+ */
+internal fun parseGiteeRelease(
+  json: String,
+  source: AppUpdateSource,
+): AppUpdateRelease? {
+  val payload =
+    runCatching { appUpdateJson.decodeFromString<GiteeReleasePayload>(json) }.getOrNull()
+      ?: return null
+  val tag = payload.tagName?.trim().orEmpty()
+  val version = normalizeAppVersion(tag)
+  if (version.isEmpty()) return null
+  return AppUpdateRelease(
+    version = version,
+    tag = tag,
+    title = payload.name?.trim().orEmpty().ifEmpty { tag },
+    notes = payload.body.orEmpty(),
+    downloadUrl = payload.assets.orEmpty().apkDownloadUrl(),
+    pageUrl = source.releasePageUrl(tag),
+  )
+}
+
+/** Picks the arm64 build when a release carries several APKs. */
+private fun List<GiteeAssetPayload>.apkDownloadUrl(): String? {
+  val apks =
+    filter { asset ->
+      asset.name?.endsWith(".apk", ignoreCase = true) == true &&
+        asset.downloadUrl?.startsWith("https://") == true
+    }
+  val preferred =
+    apks.firstOrNull { it.name.orEmpty().contains("arm64", ignoreCase = true) }
+      ?: apks.firstOrNull()
+  return preferred?.downloadUrl
 }
 
 /** Raw `<entry>` values as GitHub writes them, before link extraction. */
@@ -180,23 +336,24 @@ private data class FeedEntry(
  * GitHub orders entries newest-first and excludes drafts, so the first entry is the
  * current release. Returns null when the document parses but carries no usable entry
  * or no version-bearing tag, which the caller reports as an unexpected response.
+ *
+ * The feed has no asset list, so `downloadUrl` stays null here and is filled by the
+ * tag's asset fragment fetch.
  */
 internal fun parseNewestRelease(
   xml: String,
-  linkPattern: String,
+  source: AppUpdateSource,
 ): AppUpdateRelease? {
   val entry = readNewestEntry(xml) ?: return null
   val version = normalizeAppVersion(entry.tag)
   if (version.isEmpty()) return null
-  val notes = plainTextFromHtml(entry.notesHtml)
-  val download = extractDownloadLink(notes, linkPattern)
   return AppUpdateRelease(
     version = version,
     tag = entry.tag,
     title = entry.title.ifBlank { entry.tag },
-    notes = notes,
-    downloadUrl = download?.url,
-    downloadPassword = download?.password,
+    notes = plainTextFromHtml(entry.notesHtml),
+    downloadUrl = null,
+    pageUrl = source.releasePageUrl(entry.tag),
   )
 }
 
@@ -236,11 +393,13 @@ private fun readNewestEntry(xml: String): FeedEntry? =
   }.getOrNull()
 
 /**
- * Converts a release-notes HTML body into readable dialog text.
+ * Converts GitHub's HTML release body into readable dialog text.
  *
- * The feed body arrives XML-escaped and `XmlPullParser` has already resolved those
+ * The Atom body arrives XML-escaped and `XmlPullParser` has already resolved those
  * entities by the time `nextText()` returns, so this only has to lay out and drop
  * markup — decoding entities again here would corrupt any `&` the author typed.
+ * No token-free GitHub endpoint returns the authored Markdown, so this mirror ships
+ * normalized text while Gitee's JSON API feeds the renderer real Markdown.
  */
 internal fun plainTextFromHtml(html: String): String {
   if (html.isBlank()) return ""
@@ -251,34 +410,6 @@ internal fun plainTextFromHtml(html: String): String {
     .replace(Regex("[ \t]*\n[ \t]*"), "\n")
     .replace(Regex("\n{3,}"), "\n\n")
     .trim()
-}
-
-/** A download link lifted from release notes, with its share password when one is printed. */
-internal data class AppUpdateDownload(
-  val url: String,
-  val password: String?,
-)
-
-/**
- * Pulls the download link and its share password out of the release notes.
- *
- * A pattern with a capture group yields that group, so a rule can match surrounding
- * Markdown and still hand back the bare URL. An unusable pattern falls back to the
- * Lanzou default rather than silently disabling updates.
- */
-internal fun extractDownloadLink(
-  notes: String,
-  linkPattern: String,
-): AppUpdateDownload? {
-  if (notes.isBlank()) return null
-  val regex =
-    runCatching { Regex(linkPattern) }.getOrNull()?.takeIf { it.pattern.isNotBlank() }
-      ?: Regex(DEFAULT_APP_UPDATE_LINK_PATTERN)
-
-  val match = regex.find(notes) ?: return null
-  val url = (match.groupValues.getOrNull(1)?.takeIf { it.isNotBlank() } ?: match.value).trim()
-  if (url.isEmpty()) return null
-  return AppUpdateDownload(url = url, password = DOWNLOAD_PASSWORD_LABELS.find(notes)?.groupValues?.getOrNull(1))
 }
 
 /**

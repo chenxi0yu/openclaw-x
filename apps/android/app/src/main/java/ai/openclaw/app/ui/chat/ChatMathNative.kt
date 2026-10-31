@@ -54,20 +54,24 @@ internal fun cachedChatMathLayout(
   latex: String,
   textSizePx: Float,
   colorArgb: Int,
-): ChatMathLayout? = chatMathLayoutCache.get("$colorArgb|$textSizePx|$latex")
+): ChatMathLayout? = chatMathLayoutCache.get("$colorArgb|$textSizePx|${normalizeChatLatex(latex)}")
 
 private fun layoutChatMath(
   latex: String,
   textSizePx: Float,
   colorArgb: Int,
 ): ChatMathLayout? {
-  val key = "$colorArgb|$textSizePx|$latex"
+  // LLM-authored TeX routinely uses commands the bundled engine lacks; rewriting
+  // them to supported equivalents before layout is the difference between a
+  // rendered formula and the raw source.
+  val normalized = normalizeChatLatex(latex)
+  val key = "$colorArgb|$textSizePx|$normalized"
   chatMathLayoutCache.get(key)?.let { return it }
   val layout =
     runCatching {
       val drawable =
         JLatexMathDrawable
-          .builder(latex)
+          .builder(normalized)
           .textSize(textSizePx)
           .color(colorArgb)
           .build()
@@ -78,6 +82,44 @@ private fun layoutChatMath(
     }.getOrNull() ?: return null
   chatMathLayoutCache.put(key, layout)
   return layout
+}
+
+private val chatLatexBareVerticalBar = Regex("""\\[lr]vert(?![a-zA-Z])""")
+private val chatLatexTag = Regex("""\\tag\*?\s*\{[^{}]*\}""")
+private val chatLatexLabel = Regex("""\\label\s*\{[^{}]*\}""")
+private val chatLatexSpacing = Regex("""\\(?:hspace|vspace)\*?\s*\{[^{}]*\}""")
+private val chatLatexMathClass = Regex("""\\(?:mathbin|mathrel|mathop|mathord|mathopen|mathclose|mathpunct|mathinner)\s*""")
+private val chatLatexEquationEnv = Regex("""\\(?:begin|end)\{equation\*?\}""")
+
+/**
+ * Rewrites TeX the bundled engine cannot parse. `\lvert`/`\rvert` are the common
+ * LLM spelling of `\vert` and are not in jlatexmath's command set; equation
+ * numbering and spacing commands are presentation-only and would otherwise
+ * fail the whole formula.
+ */
+internal fun normalizeChatLatex(latex: String): String {
+  if (latex.isEmpty()) return latex
+  var out = latex
+  if (out.contains("\\lvert") || out.contains("\\rvert")) {
+    // A lambda keeps the replacement's backslash literal; Matcher replacement
+    // strings drop `\v`.
+    out = chatLatexBareVerticalBar.replace(out) { "\\vert" }
+  }
+  if (out.contains("\\tag")) out = out.replace(chatLatexTag, "")
+  if (out.contains("\\label")) out = out.replace(chatLatexLabel, "")
+  if (out.contains("hspace") || out.contains("vspace")) out = out.replace(chatLatexSpacing, "")
+  if (out.contains("equation")) out = out.replace(chatLatexEquationEnv, "")
+  if (out.contains("\\operatorname*")) out = out.replace("\\operatorname*", "\\operatorname")
+  if (out.contains("\\nonumber")) out = out.replace("\\nonumber", "")
+  if (out.contains("\\notag")) out = out.replace("\\notag", "")
+  if (out.contains("\\middle")) out = out.replace(Regex("""\\middle(?![a-zA-Z])"""), "")
+  if (out.contains("mathbin") || out.contains("mathrel") || out.contains("mathop") ||
+    out.contains("mathord") || out.contains("mathopen") || out.contains("mathclose") ||
+    out.contains("mathpunct") || out.contains("mathinner")
+  ) {
+    out = out.replace(chatLatexMathClass, "")
+  }
+  return out
 }
 
 /**
@@ -126,14 +168,21 @@ internal fun rememberInlineChatMath(
 internal fun ChatMathCanvas(
   layout: ChatMathLayout,
   modifier: Modifier = Modifier,
+  scale: Float = 1f,
 ) {
   val density = LocalDensity.current
-  val width = with(density) { layout.widthPx.toDp() }
-  val height = with(density) { layout.heightPx.toDp() }
+  val width = with(density) { (layout.widthPx * scale).toDp() }
+  val height = with(density) { (layout.heightPx * scale).toDp() }
   Canvas(modifier = modifier.size(width, height)) {
     drawIntoCanvas { canvas ->
+      val native = canvas.nativeCanvas
+      if (scale != 1f) {
+        native.save()
+        native.scale(scale, scale)
+      }
       layout.drawable.setBounds(0, 0, layout.widthPx, layout.heightPx)
-      layout.drawable.draw(canvas.nativeCanvas)
+      layout.drawable.draw(native)
+      if (scale != 1f) native.restore()
     }
   }
 }

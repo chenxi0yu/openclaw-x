@@ -635,6 +635,13 @@ class ChatController internal constructor(
   // transcript yet, so the sidebar must not grow a "New chat" row until the first turn.
   private val pendingFirstTurnSessionKeys = mutableSetOf<String>()
 
+  // The startup "new chat" preference is a local draft: the selected session's transcript
+  // is blanked but no gateway session exists until the first send creates one, so no
+  // device can ever list an empty conversation. Guarded by gatewayScopeApplyLock;
+  // observed by the chat header so the draft reads as a fresh conversation.
+  private val pendingLocalNewChat = MutableStateFlow(false)
+  val localNewChatDraft: StateFlow<Boolean> = pendingLocalNewChat.asStateFlow()
+
   private fun projectLocalSessionTitles(
     entries: List<ChatSessionEntry>,
     binding: MainSessionBinding?,
@@ -663,9 +670,8 @@ class ChatController internal constructor(
 
   private fun markSessionFirstTurnStarted(sessionKey: String) {
     synchronized(gatewayScopeApplyLock) {
-      if (pendingFirstTurnSessionKeys.remove(sessionKey)) {
-        publishSessions(_sessions.value)
-      }
+      val removed = pendingFirstTurnSessionKeys.remove(sessionKey)
+      if (removed) publishSessions(_sessions.value)
     }
   }
 
@@ -1304,6 +1310,7 @@ class ChatController internal constructor(
     val selectedKey = mainSessionKey.trim()
     if (selectedKey.isEmpty()) return
     prepareSessionSelection(selectedKey)
+    pendingLocalNewChat.value = false
     bindMainSessionKey(mainSessionKey, loadHistory = false)
     val key = normalizeRequestedSessionKey(mainSessionKey)
     if (_sessionKey.value != key || _sessionOwnerAgentId.value != resolveAgentIdFromMainSessionKey(key)) {
@@ -1705,6 +1712,7 @@ class ChatController internal constructor(
         }
       val lease = captureRequestLease(requestCacheScope) ?: throw GatewayRequestNotEnqueued("not connected")
       val createdKey = parseCreatedSessionKey(json, requestSessionCreate(requestCacheScope, params, lease))
+      synchronized(gatewayScopeApplyLock) { pendingLocalNewChat.value = false }
       fetchSessions(limit = sessionsListLimit, archived = false)
       createdKey
     } catch (err: Throwable) {
@@ -1892,6 +1900,7 @@ class ChatController internal constructor(
     if (!canSwitchSessionBranch(snapshot)) return false
     if (_sessionBranches.value.any { it.leafEntryId == leaf && it.active }) return false
     if (!sessionBranchSwitchClaimed.compareAndSet(false, true)) return false
+    pendingLocalNewChat.value = false
     val switchGeneration = sessionBranchSwitchGeneration.incrementAndGet()
     _sessionBranchSwitching.value = true
     val mutationLease = beginOutboxSessionMutation(snapshot, expectedEventReason = "branch-switch")
@@ -2627,31 +2636,67 @@ class ChatController internal constructor(
       (role == "user" || role == "assistant") && (message.content.isNotEmpty() || message.turnBoundary)
     }
 
-  /** Starts a fresh chat for the active gateway session key. */
-  fun startNewChat(worktree: Boolean = false) {
-    // A chat with nothing in it already *is* the new chat. Creating another one
-    // only stacks an identical "New chat" row in the session list, which is what
-    // turns the list into a wall of empties. Worktree requests are exempt: they
-    // exist to move the workspace, so they must always create.
-    if (!worktree && !_sessionId.value.isNullOrBlank() && !activeChatHasContent()) {
+  /**
+   * Blanks the transcript for the startup "new chat" preference without creating a
+   * session. The first send creates it (see the send path), matching the web draft
+   * flow where a session only exists once it has a turn.
+   */
+  fun beginLocalNewChat() {
+    synchronized(gatewayScopeApplyLock) {
+      pendingLocalNewChat.value = true
+      // Fence history loads already in flight for the previous session; later loads
+      // stay blank while the draft is active (gated at history application).
+      historyLoadGeneration.incrementAndGet()
+      _messages.value = emptyList()
+      _messagesFromCache.value = false
+      clearLiveHistoryMarker()
+      clearPendingRuns()
+      clearLiveRunUi()
       updateErrorText(null)
-      return
     }
-    scope.launch { startNewChatAwait(worktree = worktree) }
   }
 
-  /** Starts a fresh chat and returns whether the gateway created the session. */
+  /** Starts a fresh chat for the active gateway session key. */
+  fun startNewChat(worktree: Boolean = false) {
+    if (worktree) {
+      // Worktree requests move the workspace, so they must create on the gateway now.
+      scope.launch { startNewChatAwait(worktree = true) }
+      return
+    }
+    // A plain New is a local draft like the startup preference: nothing exists on the
+    // gateway until the first send (or the first session-settings change) creates it.
+    // Creating the session here left a permanent empty "New chat" row per tap that
+    // every client and every later launch had to list.
+    if (_pendingRunCount.value > 0) {
+      updateLocalizedErrorText(nativeText("Wait for the current response to finish before starting a new chat."))
+      return
+    }
+    beginLocalNewChat()
+  }
+
+  /**
+   * Session-scoped settings need a real session. While a draft is active the write
+   * creates that session first, so it lands on the new chat instead of silently
+   * patching the conversation the draft was started from.
+   */
+  private suspend fun ensureDraftSessionForSettings(sessionKey: String): String? {
+    val key = normalizeRequestedSessionKey(sessionKey)
+    if (!pendingLocalNewChat.value || key != normalizeRequestedSessionKey(_sessionKey.value)) return key
+    return startNewChatAwait()
+  }
+
+  /** Starts a fresh chat and returns the created session key, or null on failure. */
   suspend fun startNewChatAwait(
     worktree: Boolean = false,
     catalogId: String? = null,
-  ): Boolean {
+  ): String? {
     val createContext = currentCoroutineContext()
     createContext.ensureActive()
     val selection: SessionActionSnapshot
     val parentSessionId: String?
     val defaultAgentRevision: Long?
     synchronized(gatewayScopeApplyLock) {
-      selection = currentSessionActionSnapshot(_sessionKey.value) ?: return false
+      selection = currentSessionActionSnapshot(_sessionKey.value) ?: return null
       parentSessionId = _sessionId.value
       defaultAgentRevision = currentDefaultAgentRevision().takeIf { activeSessionTracksDefaultAgent(selection.sessionKey) }
     }
@@ -2660,10 +2705,10 @@ class ChatController internal constructor(
     val ownerAgentId = selection.ownerAgentId
     if (_pendingRunCount.value > 0) {
       updateLocalizedErrorText(nativeText("Wait for the current response to finish before starting a new chat."))
-      return false
+      return null
     }
     if (!_isCreatingSession.compareAndSet(false, true)) {
-      return false
+      return null
     }
     val lease = captureRequestLease(createGatewayScope)
 
@@ -2691,7 +2736,7 @@ class ChatController internal constructor(
       applyIfCurrent {
         createContext.ensureActive()
         updateErrorText(null)
-      } ?: return false
+      } ?: return null
       if (lease == null) throw GatewayRequestNotEnqueued("not connected")
       val inheritParent =
         synchronized(gatewayScopeApplyLock) {
@@ -2699,9 +2744,7 @@ class ChatController internal constructor(
           // guard can reject them. A plain New must not carry lineage: a linked
           // child key makes the sessions tree nest the fresh conversation under
           // whatever happened to be open when "+" was tapped.
-          worktree &&
-            !_sessionId.value.isNullOrBlank() &&
-            !isSessionModelSelectionLocked(sessionSettingsKey(parentKey, createGatewayScope, ownerAgentId))
+          worktree && !_sessionId.value.isNullOrBlank()
         }
       val params =
         buildJsonObject {
@@ -2735,14 +2778,15 @@ class ChatController internal constructor(
             ownerAgentId = ownerAgentId,
             rememberSelection = true,
           )
-        } ?: return false
+        } ?: return null
       bootstrap(sessionKey = createdKey, generation = generation).await()
-      true
+      synchronized(gatewayScopeApplyLock) { pendingLocalNewChat.value = false }
+      createdKey
     } catch (err: CancellationException) {
       throw err
     } catch (err: Throwable) {
       applyIfCurrent { updateErrorText(err.message) }
-      false
+      null
     } finally {
       _isCreatingSession.value = false
     }
@@ -2769,8 +2813,9 @@ class ChatController internal constructor(
       } else {
         ChatFastMode.Off
       }
-    val queued = enqueueSessionSettingsMutation(sessionSettingsKey(normalizeRequestedSessionKey(sessionKey)))
     scope.launch(start = CoroutineStart.UNDISPATCHED) {
+      val key = ensureDraftSessionForSettings(sessionKey) ?: return@launch
+      val queued = enqueueSessionSettingsMutation(sessionSettingsKey(key))
       runSessionSettingsMutation(queued, SessionSettingsChange.FastMode(mode))
     }
   }
@@ -2781,9 +2826,9 @@ class ChatController internal constructor(
     val selection = _thinkingLevelSelection.value
     if (selection.isGatewayProvided && selection.options.none { it.id == normalized }) return
     if (normalized == _thinkingLevel.value) return
-    val key = normalizeRequestedSessionKey(_sessionKey.value)
-    val queued = enqueueSessionSettingsMutation(sessionSettingsKey(key), ThinkingIntent(normalized))
     scope.launch(start = CoroutineStart.UNDISPATCHED) {
+      val key = ensureDraftSessionForSettings(_sessionKey.value) ?: return@launch
+      val queued = enqueueSessionSettingsMutation(sessionSettingsKey(key), ThinkingIntent(normalized))
       runSessionSettingsMutation(queued, SessionSettingsChange.Thinking(normalized))
     }
   }
@@ -2810,11 +2855,12 @@ class ChatController internal constructor(
       updateLocalizedErrorText(nativeText("Update the Gateway to change session permissions."))
       return false
     }
+    val targetKey = ensureDraftSessionForSettings(sessionKey) ?: return false
     // A queued permission change keeps the identity and policy the operator saw,
     // rather than adopting a reset session or another client's later selection.
     val (settingsKey, change) =
       synchronized(gatewayScopeApplyLock) {
-        val key = sessionSettingsKey(normalizeRequestedSessionKey(sessionKey))
+        val key = sessionSettingsKey(normalizeRequestedSessionKey(targetKey))
         val entry = _sessions.value.firstOrNull { it.key == key.sessionKey }
         val sessionId = entry?.sessionId?.takeIf { it.isNotBlank() }
         if (entry == null || sessionId == null) {
@@ -2838,11 +2884,13 @@ class ChatController internal constructor(
   internal suspend fun setSessionModelAwait(
     sessionKey: String,
     modelRef: String?,
-  ): Boolean =
-    runSessionSettingsMutation(
-      enqueueSessionSettingsMutation(sessionSettingsKey(normalizeRequestedSessionKey(sessionKey))),
+  ): Boolean {
+    val targetKey = ensureDraftSessionForSettings(sessionKey) ?: return false
+    return runSessionSettingsMutation(
+      enqueueSessionSettingsMutation(sessionSettingsKey(normalizeRequestedSessionKey(targetKey))),
       SessionSettingsChange.Model(modelRef?.trim()?.takeIf(String::isNotEmpty)),
     )
+  }
 
   private fun enqueueSessionSettingsMutation(
     settingsKey: SessionSettingsKey,
@@ -3330,8 +3378,12 @@ class ChatController internal constructor(
     prepareSessionSelection(key)
     val generation =
       synchronized(gatewayScopeApplyLock) {
+        // Re-selecting the session a draft blanked must repaint its transcript, so
+        // that case reloads instead of short-circuiting on the unchanged key.
+        val draftBlankedThisSession = pendingLocalNewChat.value && key == _sessionKey.value
+        pendingLocalNewChat.value = false
         if (rememberSelection) rememberSelectedChatSession(key, owner)
-        if (key == _sessionKey.value && owner == _sessionOwnerAgentId.value) return
+        if (key == _sessionKey.value && owner == _sessionOwnerAgentId.value && !draftBlankedThisSession) return
         beginHistoryLoad(key, ownerAgentId = owner, refreshSessions = false)
       }
     bootstrap(sessionKey = key, generation = generation)
@@ -3524,6 +3576,24 @@ class ChatController internal constructor(
     expectedOwner: ChatComposerOwner?,
     idempotencyKey: String? = null,
   ): Boolean {
+    // A local New-chat draft has no session yet, so this send creates it. Creating moves the
+    // UI with the draft, which means the owner captured for the draft no longer equals the
+    // owner of the created key — comparing it afterwards would reject the first message of
+    // every new chat. The comparison still runs against the pre-create key, which is what
+    // catches a chat switch racing this send.
+    val draftSessionCreated =
+      if (pendingLocalNewChat.value) {
+        if (expectedOwner != null && !isCurrentComposerOwner(expectedOwner)) return false
+        pendingLocalNewChat.value = false
+        if (startNewChatAwait() == null) {
+          // The draft outlived a failed create; the composer restores the text on `false`.
+          pendingLocalNewChat.value = true
+          return false
+        }
+        true
+      } else {
+        false
+      }
     val sendCacheScope = currentCacheScope()
     val sendGatewayId = sendCacheScope?.gatewayId
     val sendSelectionGeneration = chatSelectionGeneration.value
@@ -3533,7 +3603,8 @@ class ChatController internal constructor(
     val effectiveSessionKey = normalizeRequestedSessionKey(sessionKey)
     // Owner-aware UI sends must wait for Android's device-scoped main key. The legacy `main`
     // alias is resolved by the gateway's mutable default agent and cannot be routed immutably.
-    if (expectedOwner != null && !isCurrentComposerOwner(expectedOwner)) return false
+    val adoptedExpectedOwner = expectedOwner.takeUnless { draftSessionCreated }
+    if (adoptedExpectedOwner != null && !isCurrentComposerOwner(adoptedExpectedOwner)) return false
     val routingOwner =
       resolveChatComposerRoutingOwner(
         gatewayStableId = sendCacheScope?.gatewayId,
@@ -3542,8 +3613,8 @@ class ChatController internal constructor(
         mainSessionKey = appliedMainSessionKey,
       )
         ?: return false
-    if (expectedOwner != null && expectedOwner != routingOwner) return false
-    val capturedOwner = expectedOwner ?: routingOwner
+    if (adoptedExpectedOwner != null && adoptedExpectedOwner != routingOwner) return false
+    val capturedOwner = adoptedExpectedOwner ?: routingOwner
     val tracksDefaultAgent = activeSessionTracksDefaultAgent(effectiveSessionKey)
     val sendDefaultAgentRevision = currentDefaultAgentRevision()
 
@@ -4906,7 +4977,11 @@ class ChatController internal constructor(
                         !unresolvedRepliesByRunId.containsKey(it)
                     }.forEach { clearPendingRun(it, publishRunState = false) }
                 }
-                val nextMessages = mergeOptimisticMessages(incoming = history.messages, optimistic = optimisticMessagesByRunId.values)
+                // A startup draft blanks the transcript of the session it started from;
+                // history for that same session must not repaint the empty chat.
+                val incoming =
+                  if (pendingLocalNewChat.value) emptyList() else history.messages
+                val nextMessages = mergeOptimisticMessages(incoming = incoming, optimistic = optimisticMessagesByRunId.values)
                 // Merge before pruning: the canonical user row often arrives without inline
                 // media, so pruning the optimistic row first would discard the only image bytes.
                 prunePersistedOptimisticMessages(history.messages)
@@ -5104,6 +5179,7 @@ class ChatController internal constructor(
         visibleRowsAreOnlyProjected &&
         requestCacheScope == currentCacheScope() &&
         requestOwnerIsCurrent() &&
+        !pendingLocalNewChat.value &&
         isCurrentHistoryLoad(sessionKey, _sessionKey.value, generation, historyLoadGeneration.get())
       ) {
         _messagesFromCache.value = true
@@ -8909,7 +8985,10 @@ private fun normalizeChatRunId(value: JsonElement?): String? =
     ?.takeIf(String::isNotEmpty)
 
 private const val CHAT_TOOL_DETAIL_MAX_CHARS = 600
-private const val CHAT_TOOL_RESULT_MAX_CHARS = 2_000
+// 20k: a web_search envelope (8 hits × title/snippet × untrusted wrappers) is
+// several KB of JSON; the old 2k cap cut every envelope mid-array, so the
+// results card could never parse and every search fell back to raw text.
+private const val CHAT_TOOL_RESULT_MAX_CHARS = 20_000
 
 private fun boundedToolText(
   value: String?,

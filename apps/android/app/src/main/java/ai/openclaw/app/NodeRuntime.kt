@@ -2848,7 +2848,7 @@ class NodeRuntime private constructor(
 
   suspend fun createSessionCatalogEntry(catalogId: String): Boolean {
     retirePendingChatSelection()
-    return chat.startNewChatAwait(catalogId = catalogId)
+    return chat.startNewChatAwait(catalogId = catalogId) != null
   }
 
   fun setSkillEnabled(
@@ -3173,6 +3173,7 @@ class NodeRuntime private constructor(
   val chatQuestions: StateFlow<List<ChatQuestionPrompt>> = chat.questions
   val chatProgressCard: StateFlow<ChatProgressCard?> = chat.progressCard
   val chatSessions: StateFlow<List<ChatSessionEntry>> = chat.sessions
+  val chatLocalNewChatDraft: StateFlow<Boolean> = chat.localNewChatDraft
   val chatSwarmGroups: StateFlow<List<ChatSwarmGroup>> = chat.swarmGroups
   val chatSessionBranches: StateFlow<List<SessionBranch>> = chat.sessionBranches
   val chatSessionBranchesLoading: StateFlow<Boolean> = chat.sessionBranchesLoading
@@ -5973,9 +5974,23 @@ class NodeRuntime private constructor(
     chat.abort()
   }
 
+  /** Plain New blanks the transcript locally; the first send creates the gateway session. */
   fun startNewChat(worktree: Boolean = false) {
     retirePendingChatSelection()
     chat.startNewChat(worktree = worktree)
+  }
+
+  /** Cold-start variant: reports whether the gateway actually created the session. */
+  suspend fun startNewChatAwait(worktree: Boolean = false): Boolean {
+    // An explicit destination supersedes pending agent-lookup or Continue work, the
+    // same as the fire-and-forget New path.
+    retirePendingChatSelection()
+    return chat.startNewChatAwait(worktree = worktree) != null
+  }
+
+  /** Blanks the transcript for the startup "new chat" draft; no session is created. */
+  fun beginLocalNewChat() {
+    chat.beginLocalNewChat()
   }
 
   fun toggleMessageSpeech(

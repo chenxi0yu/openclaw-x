@@ -128,6 +128,9 @@ internal fun ShareSettingsScreen(
   var nowElapsedMs by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
   var pendingDelete by remember { mutableStateOf<ShareUi?>(null) }
   var deletingId by remember { mutableStateOf<String?>(null) }
+  // 404 from the share route is the plugin handshake: the route only answers when
+  // the gateway-side share plugin is loaded, so no extra gateway API is needed.
+  var pluginDialogVisible by remember { mutableStateOf(false) }
 
   fun removeShare(id: String) {
     val current = state
@@ -182,7 +185,8 @@ internal fun ShareSettingsScreen(
       is SessionShareListOutcome.Failure -> {
         val failure = outcome.failure
         if (failure.code == 404) {
-          state = ShareListState.Failed("当前网关还没有启用分享插件", pluginMissing = true)
+          state = ShareListState.Failed("当前网关还没有安装分享插件", pluginMissing = true)
+          pluginDialogVisible = true
         } else if (hadContent) {
           Toast
             .makeText(
@@ -282,7 +286,7 @@ internal fun ShareSettingsScreen(
                 modifier = Modifier.graphicsLayer { alpha = bigTitleAlpha },
               )
               Text(
-                text = "链接到期后自动失效",
+                text = "链接到期后自动失效 · 网页分享需要网关安装 share 插件",
                 style = ClawTheme.type.caption.copy(fontSize = 13.sp, lineHeight = 17.sp),
                 color = ClawTheme.colors.textMuted,
                 modifier = Modifier.graphicsLayer { alpha = bigTitleAlpha },
@@ -338,7 +342,7 @@ internal fun ShareSettingsScreen(
                   title = if (current.pluginMissing) "未安装分享插件" else nativeString("加载失败"),
                   body =
                     if (current.pluginMissing) {
-                      "当前网关没有启用 share 插件，安装后已分享的链接会显示在这里。"
+                      "网页分享（复制链接、微信好友）需要在网关侧安装并启用 share 插件，安装后已分享的链接会显示在这里。"
                     } else {
                       current.text
                     },
@@ -452,6 +456,43 @@ internal fun ShareSettingsScreen(
         )
       }
     }
+  }
+
+  if (pluginDialogVisible) {
+    AlertDialog(
+      onDismissRequest = { pluginDialogVisible = false },
+      shape = RoundedCornerShape(26.dp),
+      containerColor = ClawTheme.colors.surfaceRaised,
+      title = {
+        Text(
+          text = "需要网关安装分享插件",
+          style = ClawTheme.type.body.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium),
+          color = ClawTheme.colors.text,
+        )
+      },
+      text = {
+        Text(
+          text = "网页分享（复制链接、微信好友）依赖网关侧的 share 插件。当前网关没有检测到这个插件，安装后即可使用。",
+          style = ClawTheme.type.body.copy(fontSize = 14.sp, lineHeight = 20.sp),
+          color = ClawTheme.colors.textMuted,
+        )
+      },
+      confirmButton = {
+        TextButton(onClick = { pluginDialogVisible = false }) {
+          Text("知道了", color = ClawTheme.colors.primary)
+        }
+      },
+      dismissButton = {
+        TextButton(
+          onClick = {
+            pluginDialogVisible = false
+            reloadKey += 1
+          },
+        ) {
+          Text(nativeString("Retry"), color = ClawTheme.colors.textMuted)
+        }
+      },
+    )
   }
 
   pendingDelete?.let { share ->

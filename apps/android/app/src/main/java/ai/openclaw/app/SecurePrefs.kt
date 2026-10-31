@@ -5,8 +5,7 @@ package ai.openclaw.app
 import ai.openclaw.app.ui.design.DEFAULT_APP_TEXT_SCALE
 import ai.openclaw.app.ui.design.MAX_APP_TEXT_SCALE
 import ai.openclaw.app.ui.design.MIN_APP_TEXT_SCALE
-import ai.openclaw.app.update.DEFAULT_APP_UPDATE_LINK_PATTERN
-import ai.openclaw.app.update.DEFAULT_APP_UPDATE_REPOSITORY
+import ai.openclaw.app.update.AppUpdateSource
 import ai.openclaw.app.gateway.GatewayBootstrapHandoff
 import ai.openclaw.app.gateway.GatewayCustomHeaders
 import ai.openclaw.app.gateway.GatewayRegistryStore
@@ -121,6 +120,13 @@ class SecurePrefs(
     private const val appearanceAccentArgbKey = "appearance.accentArgb"
     private const val appearanceTextScaleKey = "appearance.textScale"
     private const val hapticsEnabledKey = "appearance.hapticsEnabled"
+    private const val appearanceStartupPageKey = "appearance.startupPage"
+    private const val appearanceLastShellTabKey = "appearance.lastShellTab"
+    private const val appearanceLastSettingsRouteKey = "appearance.lastSettingsRoute"
+    private const val appearanceStartupNewChatDraftKey = "appearance.startupNewChatDraftKey"
+    private const val chatLiveTalkVisibleKey = "chat.liveTalkVisible"
+    private const val chatVoiceInputVisibleKey = "chat.voiceInputVisible"
+    private const val composerBarStyleKey = "chat.composerBarStyle"
     private const val appearancePendingPreferencesKey = "appearance.pendingPreferences"
     private const val appearanceLocalOnlyKeysKey = "appearance.localOnlyKeys"
     private const val appearanceSyncMigrationVersionKey = "appearance.syncMigrationVersion"
@@ -133,11 +139,11 @@ class SecurePrefs(
     private const val sidebarPageOrderKey = "sidebar.pageOrder"
     private const val sidebarVisiblePagesKey = "sidebar.visiblePages"
 
-    // App update source settings: the fork's GitHub repository to query, whether to
-    // check on launch, and the rule that lifts the download link out of release notes.
-    private const val appUpdateRepositoryKey = "appUpdate.repository"
+    // App update settings: which release mirror to query and whether to check on
+    // launch. The mirror owns its repository, so there is no user-editable URL.
+    private const val appUpdateSourceKey = "appUpdate.source"
     private const val appUpdateAutoCheckKey = "appUpdate.autoCheck"
-    private const val appUpdateLinkPatternKey = "appUpdate.linkPattern"
+    private const val releaseIntroSeenVersionKey = "releaseIntro.seenVersion"
     private val appearanceSyncKeys = setOf("ui.theme", "ui.themeMode", "ui.accent")
     private const val maxChatModelRecents = 5
     private const val gatewayCustomHeadersKeyPrefix = "gateway.customHeaders."
@@ -326,25 +332,86 @@ class SecurePrefs(
     _hapticsEnabled.value = enabled
   }
 
-  // Update checks run against a public release feed, never the gateway, so these stay
-  // plain prefs: nothing here is secret and they must survive cold starts.
-  private fun loadAppUpdateRepository(): String = plainPrefs.getString(appUpdateRepositoryKey, null)?.trim().orEmpty().ifEmpty { DEFAULT_APP_UPDATE_REPOSITORY }
+  private val _appearanceStartupPage =
+    MutableStateFlow(AppearanceStartupPage.fromRawValue(plainPrefs.getString(appearanceStartupPageKey, null)))
+  val appearanceStartupPage: StateFlow<AppearanceStartupPage> = _appearanceStartupPage
 
-  private val _appUpdateRepository = MutableStateFlow(loadAppUpdateRepository())
-  val appUpdateRepository: StateFlow<String> = _appUpdateRepository
+  fun setAppearanceStartupPage(page: AppearanceStartupPage) {
+    plainPrefs.edit { putString(appearanceStartupPageKey, page.rawValue) }
+    _appearanceStartupPage.value = page
+  }
+
+  /**
+   * Key of the empty gateway draft an older build created for the "新对话" startup
+   * preference. Startup drafts are now purely local; the persisted key only exists
+   * so one launch can delete that leftover empty session from the gateway.
+   */
+  val startupNewChatDraftKey: String?
+    get() = plainPrefs.getString(appearanceStartupNewChatDraftKey, null)?.takeIf(String::isNotBlank)
+
+  fun clearStartupNewChatDraftKey() {
+    plainPrefs.edit { remove(appearanceStartupNewChatDraftKey) }
+  }
+
+  val lastShellTab: String
+    get() = plainPrefs.getString(appearanceLastShellTabKey, null).orEmpty()
+
+  val lastShellSettingsRoute: String
+    get() = plainPrefs.getString(appearanceLastSettingsRouteKey, null).orEmpty()
+
+  /** Records the visible shell page so "last closed" can reopen it after a cold start. */
+  fun rememberShellLocation(
+    tab: String,
+    settingsRoute: String,
+  ) {
+    if (lastShellTab == tab && lastShellSettingsRoute == settingsRoute) return
+    plainPrefs.edit {
+      putString(appearanceLastShellTabKey, tab)
+      putString(appearanceLastSettingsRouteKey, settingsRoute)
+    }
+  }
+
+  // Composer visibility is a device preference, not gateway state: a phone that
+  // hides the live-talk button should not hide it on a tablet.
+  private val _chatLiveTalkVisible = MutableStateFlow(plainPrefs.getBoolean(chatLiveTalkVisibleKey, false))
+  val chatLiveTalkVisible: StateFlow<Boolean> = _chatLiveTalkVisible
+
+  private val _chatVoiceInputVisible = MutableStateFlow(plainPrefs.getBoolean(chatVoiceInputVisibleKey, true))
+  val chatVoiceInputVisible: StateFlow<Boolean> = _chatVoiceInputVisible
+
+  fun setChatLiveTalkVisible(enabled: Boolean) {
+    plainPrefs.edit { putBoolean(chatLiveTalkVisibleKey, enabled) }
+    _chatLiveTalkVisible.value = enabled
+  }
+
+  fun setChatVoiceInputVisible(enabled: Boolean) {
+    plainPrefs.edit { putBoolean(chatVoiceInputVisibleKey, enabled) }
+    _chatVoiceInputVisible.value = enabled
+  }
+
+  // The input bar style is a device feel, so it stays local like the composer
+  // visibility switches instead of following the account to another device.
+  private val _composerBarStyle =
+    MutableStateFlow(ComposerBarStyle.fromRawValue(plainPrefs.getString(composerBarStyleKey, null)))
+  val composerBarStyle: StateFlow<ComposerBarStyle> = _composerBarStyle
+
+  fun setComposerBarStyle(style: ComposerBarStyle) {
+    plainPrefs.edit { putString(composerBarStyleKey, style.rawValue) }
+    _composerBarStyle.value = style
+  }
+
+  // Update checks run against public release APIs, never the gateway, so these stay
+  // plain prefs: nothing here is secret and they must survive cold starts.
+  private val _appUpdateSource =
+    MutableStateFlow(AppUpdateSource.fromStorage(plainPrefs.getString(appUpdateSourceKey, null)))
+  internal val appUpdateSource: StateFlow<AppUpdateSource> = _appUpdateSource
 
   private val _appUpdateAutoCheck = MutableStateFlow(plainPrefs.getBoolean(appUpdateAutoCheckKey, true))
   val appUpdateAutoCheck: StateFlow<Boolean> = _appUpdateAutoCheck
 
-  private fun loadAppUpdateLinkPattern(): String = plainPrefs.getString(appUpdateLinkPatternKey, null)?.trim().orEmpty().ifEmpty { DEFAULT_APP_UPDATE_LINK_PATTERN }
-
-  private val _appUpdateLinkPattern = MutableStateFlow(loadAppUpdateLinkPattern())
-  val appUpdateLinkPattern: StateFlow<String> = _appUpdateLinkPattern
-
-  fun setAppUpdateRepository(value: String) {
-    val trimmed = value.trim()
-    plainPrefs.edit { putString(appUpdateRepositoryKey, trimmed) }
-    _appUpdateRepository.value = trimmed
+  internal fun setAppUpdateSource(source: AppUpdateSource) {
+    plainPrefs.edit { putString(appUpdateSourceKey, source.name) }
+    _appUpdateSource.value = source
   }
 
   fun setAppUpdateAutoCheck(enabled: Boolean) {
@@ -352,10 +419,15 @@ class SecurePrefs(
     _appUpdateAutoCheck.value = enabled
   }
 
-  fun setAppUpdateLinkPattern(value: String) {
-    val trimmed = value.trim()
-    plainPrefs.edit { putString(appUpdateLinkPatternKey, trimmed) }
-    _appUpdateLinkPattern.value = trimmed
+  // The release intro card shows once per installed version; the stored value is
+  // the last version the operator acknowledged.
+  private val _releaseIntroSeenVersion =
+    MutableStateFlow(plainPrefs.getString(releaseIntroSeenVersionKey, null))
+  val releaseIntroSeenVersion: StateFlow<String?> = _releaseIntroSeenVersion
+
+  fun setReleaseIntroSeenVersion(version: String) {
+    plainPrefs.edit { putString(releaseIntroSeenVersionKey, version) }
+    _releaseIntroSeenVersion.value = version
   }
 
   private var pendingAppearancePreferences: List<PendingAppearancePreference> = loadPendingAppearancePreferences()

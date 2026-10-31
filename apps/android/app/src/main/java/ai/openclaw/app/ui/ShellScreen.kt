@@ -1,5 +1,6 @@
 package ai.openclaw.app.ui
 
+import ai.openclaw.app.AppearanceStartupPage
 import ai.openclaw.app.BuildConfig
 import ai.openclaw.app.GatewayAgentSummary
 import ai.openclaw.app.GatewayChannelsSummary
@@ -46,6 +47,7 @@ import ai.openclaw.app.ui.design.ClawTopBarContentHeight
 import ai.openclaw.app.ui.design.clawBackdropTopBar
 import ai.openclaw.app.ui.design.rememberClawBackdrop
 import ai.openclaw.app.ui.design.LocalClawHapticsEnabled
+import ai.openclaw.app.ui.design.LucideComposerBarIcon
 import ai.openclaw.app.ui.design.OpenClawMascot
 import ai.openclaw.app.ui.design.SIDEBAR_BLUR_MS
 import ai.openclaw.app.ui.design.SIDEBAR_BLUR_START_DP
@@ -89,6 +91,8 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -163,6 +167,12 @@ internal enum class Tab {
   Dashboard,
 }
 
+private fun startupTab(raw: String): Tab =
+  runCatching { Tab.valueOf(raw) }.getOrDefault(Tab.Chat)
+
+private fun startupSettingsRoute(raw: String): SettingsRoute =
+  runCatching { SettingsRoute.valueOf(raw) }.getOrDefault(SettingsRoute.Home)
+
 private val shellContentInsets: WindowInsets
   @Composable get() = WindowInsets.safeDrawing
 
@@ -188,11 +198,52 @@ fun ShellScreen(
   OpenClawSystemBarAppearance(lightAppearance = !shellDark)
   ClawDesignTheme(dark = shellDark, family = appearanceThemeFamily, accentArgb = appearanceAccentArgb ?: gatewayAccentArgb) {
     CompositionLocalProvider(LocalClawHapticsEnabled provides hapticsEnabled) {
-      val nav = rememberSaveable(saver = ShellNavigation.Saver) { ShellNavigation() }
+      val startupPage by viewModel.appearanceStartupPage.collectAsState()
+      val nav =
+        rememberSaveable(saver = ShellNavigation.Saver) {
+          if (viewModel.appearanceStartupPage.value == AppearanceStartupPage.LastClosed) {
+            ShellNavigation(
+              activeTab = startupTab(viewModel.lastShellTab),
+              settingsRoute = startupSettingsRoute(viewModel.lastShellSettingsRoute),
+            )
+          } else {
+            ShellNavigation()
+          }
+        }
+      // Keep the last visible page for the "上次关闭" startup choice. Writing only
+      // on actual change avoids prefs churn while the shell recomposes.
+      LaunchedEffect(nav.activeTab, nav.settingsRoute) {
+        viewModel.rememberShellLocation(nav.activeTab.name, nav.settingsRoute.name)
+      }
       var commandOpen by rememberSaveable { mutableStateOf(false) }
       var conversationScreenWasActive by rememberSaveable { mutableStateOf(false) }
       val pendingTrust by viewModel.pendingGatewayTrust.collectAsState()
       val pendingAppUpdate by viewModel.pendingAppUpdate.collectAsState()
+      // Release intro: one card per installed version, acknowledged by its own
+      // buttons. Kept composed after dismissal so the exit spring can play.
+      var releaseIntroVisible by rememberSaveable { mutableStateOf(false) }
+      LaunchedEffect(Unit) {
+        // Debug builds replay it every launch so the card stays testable; a
+        // shipped build shows it once per installed version. The short hold
+        // lets the shell settle so the slide never runs over startup work.
+        if (BuildConfig.DEBUG || viewModel.releaseIntroSeenVersion.value != BuildConfig.VERSION_NAME) {
+          delay(800)
+          releaseIntroVisible = true
+        }
+      }
+      val releaseIntroPages =
+        remember {
+          listOf(
+            ReleaseUpdatePage(
+              icon = LucideComposerBarIcon,
+              // Same tile colour as the Appearance row this update points at.
+              tint = settingsRouteTint(SettingsRoute.Appearance),
+              title = "输入栏焕新",
+              body =
+                "输入栏新增「简约」样式：独立的 ＋ 圆钮与玻璃胶囊会随输入自动增高，多行时可展开全屏书写。\n\n在 设置 › 外观 › 显示 › 输入栏 中切换样式，也可以随时切回「经典」。",
+            ),
+          )
+        }
       // One launch-time update check, gated on the user's auto-check preference.
       // Reads the live pref at execution so a first-frame composition order can't
       // skip it; keyed on Unit so toggling the switch later never re-fires it.
@@ -233,6 +284,19 @@ fun ShellScreen(
         val chatSessions by viewModel.chatSessions.collectAsState()
         val chatSessionKey by viewModel.chatSessionKey.collectAsState()
         val gatewayConnectionDisplay by viewModel.gatewayConnectionDisplay.collectAsState()
+        // "新对话" applies once per cold start. The draft is purely local: the
+        // transcript is blanked without creating a gateway session, so the mask
+        // only needs the runtime to exist and the first send creates the session.
+        val startupNewChatPending by viewModel.startupNewChatPending.collectAsState()
+        LaunchedEffect(runtimeInitialized, startupPage, startupNewChatPending) {
+          if (
+            runtimeInitialized &&
+            startupNewChatPending &&
+            startupPage == AppearanceStartupPage.NewChat
+          ) {
+            viewModel.startLocalNewChatDraft()
+          }
+        }
 
         LaunchedEffect(requestedHomeDestination) {
           val destination = requestedHomeDestination ?: return@LaunchedEffect
@@ -549,6 +613,28 @@ fun ShellScreen(
             // Shown shell-wide so a launch-time update prompt survives tab navigation.
             AppUpdateDialog(release = release, onDismiss = viewModel::dismissAppUpdate)
           }
+
+          // Sits above the shell so the intro survives whichever tab the app
+          // restored, and yields to the trust/update prompts instead of stacking.
+          ReleaseUpdateSheet(
+            visible =
+              releaseIntroVisible &&
+                !commandOpen &&
+                pendingTrust == null &&
+                pendingAppUpdate == null,
+            version = BuildConfig.VERSION_NAME,
+            pages = releaseIntroPages,
+            onDismiss = {
+              releaseIntroVisible = false
+              viewModel.markReleaseIntroSeen()
+            },
+            onFinish = {
+              releaseIntroVisible = false
+              viewModel.markReleaseIntroSeen()
+              viewModel.requestComposerBarSettings()
+              nav.openSettingsRoute(SettingsRoute.Appearance)
+            },
+          )
         }
       }
     }
@@ -1635,6 +1721,12 @@ private fun SettingsShellScreen(
     }
   }
 
+  // Hoisted out of the AnimatedContent: the home page leaves composition while a
+  // detail route is open, so a state remembered inside it would restart at the top
+  // on return. The shell outlives every push/pop, which is exactly the lifetime
+  // the scroll position needs.
+  val homeListState = rememberLazyListState()
+
   // Home and detail sit one push apart, so both render inside the same AnimatedContent: the page
   // being left has to stay composed while it slides away, which an early return cannot do.
   // System Back stays owned by the shell-level BackHandler, which unwinds cross-tab opens to
@@ -1652,6 +1744,7 @@ private fun SettingsShellScreen(
         onOpenSidebar = onOpenSidebar,
         onRouteChange = onRouteChange,
         onOpenCommand = onOpenCommand,
+        listState = homeListState,
       )
     } else {
       SettingsDetailScreen(viewModel = viewModel, route = targetRoute, onBack = onBack)
@@ -1666,6 +1759,7 @@ private fun SettingsHomeScreen(
   onOpenSidebar: () -> Unit,
   onRouteChange: (SettingsRoute) -> Unit,
   onOpenCommand: () -> Unit,
+  listState: LazyListState,
 ) {
   val gatewayProfileState by viewModel.gatewayProfile.collectAsState()
   val gatewayProfile = (gatewayProfileState as? GatewayProfileState.Ready)?.profile
@@ -1706,7 +1800,6 @@ private fun SettingsHomeScreen(
 
   val appLanguage = currentAppLanguage()
 
-  val listState = androidx.compose.foundation.lazy.rememberLazyListState()
   val darkTheme = ClawTheme.colors.canvas.luminance() < 0.5f
   val statusBarHeight = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
   val topBarHeight = statusBarHeight + ClawTopBarContentHeight

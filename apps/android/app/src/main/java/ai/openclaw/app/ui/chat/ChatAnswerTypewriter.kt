@@ -57,6 +57,12 @@ internal class ChatAnswerTypewriter {
   private fun continues(text: String): Boolean =
     owner.isNotEmpty() && (text.startsWith(owner) || owner.startsWith(text))
 
+  /** True until the newest answer has finished typing itself out. */
+  fun isRevealing(text: String): Boolean {
+    if (text.isEmpty()) return false
+    return !isRevealed(text)
+  }
+
   private fun isRevealed(text: String): Boolean = owner == text && revealed >= text.length
 }
 

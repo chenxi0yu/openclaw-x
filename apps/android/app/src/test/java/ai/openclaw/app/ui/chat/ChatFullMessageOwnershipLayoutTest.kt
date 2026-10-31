@@ -1272,12 +1272,12 @@ class ChatFullMessageOwnershipLayoutTest {
       assertEquals(text, gateway.speechReads.value.last())
       composeRule.runOnIdle { model.stopChatMessageSpeech() }
       openMessageActions()
-      composeRule.onNodeWithText("Reply").performClick()
-      val expectedReply = quoteChatMessage(text)
+      composeRule.onNodeWithText("Follow up").performClick()
       composeRule.waitUntil(FULL_MESSAGE_READY_TIMEOUT_MS) {
-        composeRule.onAllNodes(hasSetTextAction() and hasText(expectedReply)).fetchSemanticsNodes().isNotEmpty()
+        model.chatComposerState.quoteDrafts.isNotEmpty()
       }
-      composeRule.onNode(hasSetTextAction() and hasText(expectedReply)).assertExists()
+      val quote = model.chatComposerState.quoteDrafts.values.single()
+      assertEquals(text, quote.body)
     }
 
     assertMediaOrder()
@@ -1285,13 +1285,7 @@ class ChatFullMessageOwnershipLayoutTest {
     awaitExpanded(full)
     assertMediaOrder()
     assertActions(full)
-    openMessageActions()
-    composeRule.onNodeWithText("Select text").performClick()
-    awaitSelectionText(full)
-    assertNativeTailAndSelection(full, FULL_MESSAGE_MEDIA_TEXT)
-    composeRule.onNodeWithText("Done").performClick()
-    composeRule.onNode(isDialog()).assertDoesNotExist()
-    composeRule.runOnIdle { assertTrue(nativeReaders().isEmpty()) }
+    composeRule.runOnIdle { model.chatComposerState.clearQuote(model.chatComposerState.quoteDrafts.keys.single()) }
     awaitExpanded(full)
     composeRule.onNodeWithText("Show less").performScrollTo().performClick()
     assertInlineCollapsed()

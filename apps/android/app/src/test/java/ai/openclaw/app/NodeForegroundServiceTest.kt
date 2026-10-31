@@ -132,6 +132,40 @@ class NodeForegroundServiceTest {
     }
 
   @Test
+  fun voiceCaptureOffUpdateDoesNotRestartAStoppedService() {
+    val app = RuntimeEnvironment.getApplication() as NodeApp
+    val controller = Robolectric.buildService(NodeForegroundService::class.java).create()
+    val appShadow = Shadows.shadowOf(app)
+    controller.destroy()
+    // Drain anything an earlier test queued before asserting this call starts nothing.
+    while (appShadow.nextStartedService != null) {
+      // drain
+    }
+
+    NodeForegroundService.setVoiceCaptureMode(app, VoiceCaptureMode.Off)
+
+    // onStop for a frozen background process used to start the dead service here and
+    // die with BackgroundServiceStartNotAllowedException. Off has no row to repaint.
+    assertNull(appShadow.nextStartedService)
+  }
+
+  @Test
+  fun voiceCaptureOffUpdateReachesARunningService() {
+    val app = RuntimeEnvironment.getApplication() as NodeApp
+    val controller = Robolectric.buildService(NodeForegroundService::class.java).create()
+    try {
+      NodeForegroundService.setVoiceCaptureMode(app, VoiceCaptureMode.Off)
+
+      val started = Shadows.shadowOf(app).nextStartedService
+      assertNotNull(started)
+      assertEquals("ai.openclaw.app.action.SET_VOICE_CAPTURE_MODE", started?.action)
+      assertEquals("Off", started?.getStringExtra("ai.openclaw.app.extra.VOICE_CAPTURE_MODE"))
+    } finally {
+      closeNodeServiceTestFixture(controller, app)
+    }
+  }
+
+  @Test
   @Config(shadows = [ServiceRuntimePrefsShadow::class])
   fun coldStickyStartRestoresSavedGatewayWithoutForegroundCapabilities() {
     val app = RuntimeEnvironment.getApplication() as NodeApp

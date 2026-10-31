@@ -2,6 +2,7 @@ package ai.openclaw.app.ui.chat
 
 import ai.openclaw.app.ChatDraft
 import ai.openclaw.app.ChatDraftPlacement
+import ai.openclaw.app.ComposerBarStyle
 import ai.openclaw.app.GatewayAgentSummary
 import ai.openclaw.app.GatewayModelSummary
 import ai.openclaw.app.GatewayModelUnavailableReason
@@ -115,19 +116,24 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
-import androidx.compose.animation.togetherWith
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -148,6 +154,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -160,7 +169,6 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -169,7 +177,6 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Checklist
@@ -192,9 +199,8 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
-import androidx.compose.material.icons.outlined.Lightbulb
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -237,6 +243,8 @@ import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.backdrops.layerBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
@@ -246,21 +254,25 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.translate
-import androidx.compose.ui.input.key.onPreInterceptKeyBeforeSoftKeyboard
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -346,13 +358,17 @@ internal fun resolveChatComposerPrimaryAction(
   runActive: Boolean,
   sendInFlight: Boolean = false,
   hasContent: Boolean,
+  liveTalkVisible: Boolean = true,
 ): ChatComposerPrimaryAction =
   when {
     runActive -> ChatComposerPrimaryAction.Stop
     sendInFlight -> ChatComposerPrimaryAction.Preparing
     hasContent && !talkActive -> ChatComposerPrimaryAction.Send
     talkActive -> ChatComposerPrimaryAction.None
-    else -> ChatComposerPrimaryAction.StartTalk
+    // With live talk hidden the primary slot is the send arrow, disabled while
+    // the composer is empty, instead of leaving an empty hole.
+    liveTalkVisible -> ChatComposerPrimaryAction.StartTalk
+    else -> ChatComposerPrimaryAction.Send
   }
 
 internal object ChatUserMessageDisclosurePolicy {
@@ -468,6 +484,14 @@ internal fun ChatScreen(
   val micCooldown by viewModel.micCooldown.collectAsState()
   val talkModeEnabled by viewModel.talkModeEnabled.collectAsState()
   val talkModeListening by viewModel.talkModeListening.collectAsState()
+  val liveTalkVisible by viewModel.chatLiveTalkVisible.collectAsState()
+  val voiceInputVisible by viewModel.chatVoiceInputVisible.collectAsState()
+  val composerBarStyle by viewModel.composerBarStyle.collectAsState()
+  // The floating simple bar rides the system gesture bar instead of a fixed band
+  // of canvas, so nothing empty is left under it. Hiding the gesture bar costs
+  // nothing: with no pill there is nothing to clear, and the pane's own 4dp gap
+  // stays.
+  val simpleComposerBottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
   val inlineMediaPlaybackBlocked = messageSpeechState?.isActive == true || talkModeEnabled || talkModeListening
   val thinkingSupported =
     chatThinkingSupported(
@@ -541,7 +565,14 @@ internal fun ChatScreen(
   val activeAgentId = sessionAgentId
   val activeAgent = gatewayAgents.firstOrNull { it.id == activeAgentId }
   val headerCatalogState by viewModel.sessionCatalogState.collectAsState()
-  val activeSessionTitle = chatHeaderSessionTitle(activeSession) { nativeString("New chat") }
+  // The startup draft has no session row of its own; read as a fresh conversation.
+  val localNewChatDraft by viewModel.chatLocalNewChatDraft.collectAsState()
+  val activeSessionTitle =
+    if (localNewChatDraft) {
+      nativeString("New chat")
+    } else {
+      chatHeaderSessionTitle(activeSession) { nativeString("New chat") }
+    }
   val activeProjectLabel = chatHeaderProjectLabel(sessionKey = sessionKey, catalogs = headerCatalogState.catalogs)
   val workspaceGit = activeAgent?.workspaceGit == true
   val context = LocalContext.current
@@ -559,6 +590,7 @@ internal fun ChatScreen(
     rememberSaveable(saver = ChatComposerMediaCheckpoint.Saver) { ChatComposerMediaCheckpoint() }
   val voiceNoteCommitCheckpoint = remember { ChatComposerMediaCheckpoint() }
   val input = inputDrafts[composerOwner]
+  val quoteDraft = composerState.quoteDrafts[composerOwner]
   val attachmentsByOwner by composerState.attachments.collectAsState()
   val attachments = attachmentsByOwner[composerOwner].orEmpty()
   val sendStates by composerState.sendStates.collectAsState()
@@ -1039,6 +1071,18 @@ internal fun ChatScreen(
   // bounds and the glide, so ChatHeader just applies `modifier`.
   val actionsMenu = rememberClawMorphMenuState()
   val actionsTrigger = rememberClawMorphTrigger(actionsMenu)
+  // The simple bar's ＋ owns a second morph surface: its primary card is the
+  // shared glass morph, and drilling adds a nested panel the shared surface
+  // cannot express (it draws exactly one shape).
+  val simpleComposerMenu = remember { SimpleComposerMenuState() }
+  // Haze on the transcript: the panel reads as a white sheet (the look the
+  // design settled on) instead of the darker backdrop shader.
+  simpleComposerMenu.morph.haze = chatHazeState
+  // One text-selection owner per session: a quote/selection cannot leak across sessions.
+  val textSelection = remember(sessionKey) { ChatTextSelectionController() }
+  var composerFocusRequest by remember(composerOwner) { mutableIntStateOf(0) }
+  var simpleEditorOpen by remember { mutableStateOf(false) }
+  var fullScreenEditorFocusRequest by remember { mutableIntStateOf(0) }
   var annotationTarget by remember { mutableStateOf<AttachmentAnnotationTarget?>(null) }
   // The header's branch-switcher action, hoisted here because the morph menu
   // (a sibling overlay, not part of the header) needs the same behavior.
@@ -1184,7 +1228,11 @@ internal fun ChatScreen(
     onQuestionDraftChanged = viewModel::updateChatQuestionDraft,
     onSkipQuestion = viewModel::skipChatQuestion,
     onStarterPrompt = { prompt -> inputDrafts[composerOwner] = prompt },
-    onReplyMessage = { value -> viewModel.setChatReplyDraft(value, composerOwner) },
+    onQuoteMessage = { quote ->
+      viewModel.setChatQuoteDraft(quote, composerOwner)
+      composerFocusRequest++
+    },
+    textSelection = textSelection,
     sessionActionsEnabled =
       pendingRunCount == 0 &&
         !sessionBranchSwitching &&
@@ -1255,6 +1303,10 @@ internal fun ChatScreen(
       Modifier
         .layerBackdrop(chatBackdrop)
         .background(ClawTheme.colors.canvas),
+    // The transcript reserves exactly the bar's height under its newest row; the
+    // classic two-row figure left a bare canvas band under the one-row simple bar.
+    composerStyle = composerBarStyle,
+    composerBottomInset = simpleComposerBottomInset,
     hazeState = chatHazeState,
     overlay = {
       Box(Modifier.fillMaxSize()) {
@@ -1294,7 +1346,7 @@ internal fun ChatScreen(
           modifier =
             Modifier
               .align(Alignment.BottomCenter)
-              .padding(bottom = 10.dp + minimumChatInputHeight()),
+              .padding(bottom = chatComposerClearance(composerBarStyle, simpleComposerBottomInset)),
         )
         if (sharePanelPayload != null) {
           // The card is modal: nothing behind it scrolls or reacts, a tap on
@@ -1346,12 +1398,41 @@ internal fun ChatScreen(
           modifier =
             Modifier
               .align(Alignment.BottomCenter)
-              .padding(bottom = 10.dp + minimumChatInputHeight()),
+              .padding(bottom = chatComposerClearance(composerBarStyle, simpleComposerBottomInset)),
         )
         ClawMorphMenuOverlay(
           state = actionsMenu,
           onDismissRequest = actionsMenu::dismiss,
           backdrop = chatBackdrop,
+        )
+        SimpleComposerMenuOverlay(
+          state = simpleComposerMenu,
+          backdrop = chatBackdrop,
+          hazeState = chatHazeState,
+        )
+        SimpleComposerFullScreenEditor(
+          visible = simpleEditorOpen,
+          value = input,
+          onValueChange = {
+            sendMessageTooLong = false
+            sendCheckpointFull = false
+            inputDrafts[composerOwner] = it
+          },
+          focusRequestId = fullScreenEditorFocusRequest,
+          backdrop = chatBackdrop,
+          onCollapse = {
+            simpleEditorOpen = false
+            composerFocusRequest++
+          },
+        )
+        ChatTextSelectionOverlay(
+          controller = textSelection,
+          backdrop = chatBackdrop,
+          onFollowUp = { quote ->
+            viewModel.setChatQuoteDraft(quote, composerOwner)
+            composerFocusRequest++
+          },
+          onCopy = { text -> copyChatText(context, text) },
         )
       }
     },
@@ -1428,6 +1509,10 @@ internal fun ChatScreen(
       commands = chatCommands,
       onOpenEffortPicker = { effortPicker.open(composerOwner, sessionKey) },
       onOpenModelPicker = { modelPicker.open(composerOwner, sessionKey) },
+      onOpenFullScreenEditor = {
+        simpleEditorOpen = true
+        fullScreenEditorFocusRequest++
+      },
       onPickImages = {
         if (!viewModel.isCurrentChatComposerOwner(composerOwner)) return@ChatComposer
         val authorizationId = composerState.beginMediaAcquisition(composerOwner) ?: return@ChatComposer
@@ -1540,6 +1625,14 @@ internal fun ChatScreen(
         }
       },
       talkActive = talkActive,
+      liveTalkVisible = liveTalkVisible,
+      voiceInputVisible = voiceInputVisible,
+      composerStyle = composerBarStyle,
+      simpleMenu = simpleComposerMenu,
+      selectedModelRef = selectedModelRef,
+      onSelectThinkingLevel = { level ->
+        if (canChangeThinking()) viewModel.setChatThinkingLevel(level)
+      },
       onToggleTalk = onToggleTalk,
       onFixConnection = onOpenGatewaySettings,
       onOpenProvidersModels = onOpenProvidersModels,
@@ -1570,6 +1663,9 @@ internal fun ChatScreen(
       },
       hazeState = chatHazeState,
       interactionLocked = shareSelectionActive,
+      quote = quoteDraft,
+      onClearQuote = { viewModel.setChatQuoteDraft(null, composerOwner) },
+      focusRequestId = composerFocusRequest,
     )
   }
 
@@ -2026,7 +2122,8 @@ private fun ChatMessageList(
   onQuestionDraftChanged: (ChatQuestionPrompt, (ChatQuestionDraft) -> ChatQuestionDraft) -> Unit,
   onSkipQuestion: (ChatQuestionPrompt) -> Unit,
   onStarterPrompt: (String) -> Unit,
-  onReplyMessage: (String) -> Unit,
+  onQuoteMessage: (ChatQuoteDraft) -> Unit,
+  textSelection: ChatTextSelectionController,
   sessionActionsEnabled: Boolean,
   onRewindMessage: (String) -> Unit,
   onForkMessage: (String) -> Unit,
@@ -2046,6 +2143,10 @@ private fun ChatMessageList(
   /** Full-pane backdrop source for the header glass and the morph menu. */
   backdropSourceModifier: Modifier = Modifier,
   headerModifier: Modifier = Modifier,
+  /** Input bar in play; the transcript reserves exactly its height under the newest row. */
+  composerStyle: ComposerBarStyle = ComposerBarStyle.Classic,
+  /** Space between the pane's bottom edge and the floating bar's gap. */
+  composerBottomInset: Dp = 10.dp,
   /** Backdrop long-press message menus blur. Published to the transcript. */
   hazeState: HazeState? = null,
   /** Pane-wide layer above header and transcript: hosts the morph menu. */
@@ -2155,9 +2256,36 @@ private fun ChatMessageList(
       timeline = timeline,
       historyLoading = historyLoading,
     )
+  // Handle drags past the transcript edge scroll it, so the selection keeps growing under the
+  // finger; the list owns that scroll.
+  SideEffect {
+    textSelection.autoScroll = { delta -> readerScroll.listState.dispatchRawDelta(delta) }
+  }
   DisposableEffect(sessionKey, turnRecapResolver) {
     onDispose { turnRecapResolver.abandonActiveWatch(sessionKey) }
   }
+  val messageListScope = rememberCoroutineScope()
+
+  fun jumpToQuotedMessage(
+    fromIndex: Int,
+    quote: String,
+  ) {
+    val target = findQuotedChatMessageIndex(timeline.items, fromIndex, quote)
+    if (target == null) {
+      Toast
+        .makeText(
+          context,
+          nativeString("Quoted message is not in this conversation."),
+          Toast.LENGTH_SHORT,
+        ).show()
+      return
+    }
+    readerScroll.navigation.launch(messageListScope) {
+      readerScroll.listState.animateScrollToItem(target)
+    }
+  }
+
+  BackHandler(enabled = textSelection.active) { textSelection.exit() }
   val shareSelectionActive = shareSelection != null
   val shareableMessageIds =
     remember(timeline.items) { chatShareableMessages(timeline.items).mapNotNull { it.entryId }.toSet() }
@@ -2192,7 +2320,8 @@ private fun ChatMessageList(
     ChatPaneLayout(
     tabletopPanes = tabletopPanes,
     features = features,
-    minimumInputHeight = minimumChatInputHeight(),
+    minimumInputHeight = minimumChatInputHeight(composerStyle),
+    composerBottomInset = composerBottomInset,
     minimumHeaderHeight = minimumHeaderHeight,
     minimumReaderHeight = minimumReaderHeight,
     touchTarget = ClawTheme.spacing.touchTarget,
@@ -2210,6 +2339,10 @@ private fun ChatMessageList(
         // Long-press menus are launched from deep inside the rows; publishing
         // here spares every bubble a `hazeState` parameter.
         LocalClawHazeState provides hazeState,
+        LocalChatTextSelectionController provides textSelection,
+        // The registry stays on for the whole transcript: Text only reports its layout
+        // once, so registering on demand would leave selection mode without geometry.
+        LocalChatTextHitRegistry provides textSelection.registry,
       ) {
         ChatMessageDisclosure(
           messages = messages,
@@ -2234,7 +2367,15 @@ private fun ChatMessageList(
               contentPadding =
                 PaddingValues(
                   top = 3.dp + headerReserve,
-                  bottom = 6.dp + minimumChatInputHeight(),
+                  // The list still reaches the pane's bottom edge so the glass
+                  // keeps content behind it, but the resting scroll position
+                  // leaves the newest row clear of the floating bar.
+                  bottom =
+                    if (composerStyle == ComposerBarStyle.Simple) {
+                      chatComposerClearance(composerStyle, composerBottomInset)
+                    } else {
+                      6.dp + minimumChatInputHeight()
+                    },
                 ),
             ) {
               itemsIndexed(items = timeline.items, key = { _, item -> chatTimelineItemKey(item) }) { index, item ->
@@ -2312,7 +2453,8 @@ private fun ChatMessageList(
                           content = visibleContent(item.message).filter { it.toolActivity == null },
                           timestampMs = item.message.timestampMs.takeIf { item.showTimestamp },
                           workDurationMs = item.workDurationMs,
-                          onReplyMessage = onReplyMessage,
+                          onQuoteMessage = onQuoteMessage,
+                          onQuoteLinkClick = { quote -> jumpToQuotedMessage(index, quote) },
                           sessionActionsEnabled = sessionActionsEnabled,
                           onRewindMessage = onRewindMessage,
                           onForkMessage = onForkMessage,
@@ -2337,6 +2479,7 @@ private fun ChatMessageList(
                         item = item.item,
                         onRetry = { onRetryOutbox(item.item.id) },
                         onDelete = { onDeleteOutbox(item.item.id) },
+                        onQuoteLinkClick = { quote -> jumpToQuotedMessage(index, quote) },
                       )
                     }
 
@@ -2346,6 +2489,7 @@ private fun ChatMessageList(
                         retryEnabled = false,
                         onRetry = { onRetryOutbox(item.item.id) },
                         onDelete = { onDeleteOutbox(item.item.id) },
+                        onQuoteLinkClick = { quote -> jumpToQuotedMessage(index, quote) },
                       )
                     }
 
@@ -2423,7 +2567,8 @@ private fun ChatMessageList(
                         live = true,
                         content = listOf(ChatMessageContent(text = item.text)),
                         timestampMs = null,
-                        onReplyMessage = onReplyMessage,
+                        onQuoteMessage = onQuoteMessage,
+                        onQuoteLinkClick = null,
                         sessionActionsEnabled = false,
                         onRewindMessage = onRewindMessage,
                         onForkMessage = onForkMessage,
@@ -2481,12 +2626,16 @@ private fun ChatMessageList(
             // never rides along under the finger, and returns once the scroll settles.
             // The share picker owns the same bottom slot, so it retires it entirely.
             ClawJumpToLatestButton(
-              visible = readerScroll.showJumpToLatest && !readerScroll.scrolling && !shareSelectionActive,
+              visible =
+                readerScroll.showJumpToLatest &&
+                  !readerScroll.scrolling &&
+                  !shareSelectionActive &&
+                  !textSelection.active,
               onClick = readerScroll.jumpToLatest,
               modifier =
                 Modifier
                   .align(Alignment.BottomCenter)
-                  .padding(bottom = 10.dp + minimumChatInputHeight()),
+                  .padding(bottom = chatComposerClearance(composerStyle, composerBottomInset)),
             )
           }
         }
@@ -2697,7 +2846,9 @@ internal fun ChatBubble(
   live: Boolean,
   content: List<ChatMessageContent>,
   timestampMs: Long?,
-  onReplyMessage: (String) -> Unit,
+  onQuoteMessage: (ChatQuoteDraft) -> Unit,
+  /** Runs when the quote link is tapped; null on rows that cannot search the timeline. */
+  onQuoteLinkClick: ((String) -> Unit)? = null,
   sessionActionsEnabled: Boolean,
   onRewindMessage: (String) -> Unit,
   onForkMessage: (String) -> Unit,
@@ -2767,10 +2918,31 @@ internal fun ChatBubble(
     // relative order of same-type parts is preserved.
     .sortedBy { part -> if (part.type == "thinking") 0 else 1 }
   val omittedImageCount = (visibleImageCount - 4).coerceAtLeast(0)
-  if (displayableContent.isEmpty()) return
+  val quoted =
+    if (isUser) {
+      splitQuotedChatContent(displayableContent)
+    } else {
+      null
+    }
+  val renderedContent = quoted?.content ?: displayableContent
+  if (renderedContent.isEmpty() && quoted == null) return
 
-  val messageText = chatMessagePlainText(displayableContent)
-  val collapsibleUserText = shouldUseUserMessageDisclosure(isUser, displayableContent)
+  val textSelection = LocalChatTextSelectionController.current
+  val textSelectionActive = textSelection?.activeMessageId == messageId
+  val anyTextSelection = textSelection?.active == true
+  val messageText = chatMessagePlainText(renderedContent)
+  fun currentQuoteText(): String =
+    chatMessageDisplayText(renderedContent)
+      .ifBlank { messageText }
+      .trim()
+  // The newest answer types itself out after the gateway row lands; keep the menu out of the
+  // way while either the live row or the reveal still owns the text.
+  val typingText = renderedContent.lastOrNull { it.type == "text" }?.text.orEmpty()
+  val outputActive =
+    live ||
+      (typewriter != null && typewriterAnimate && typewriter.isRevealing(typingText))
+  val collapsibleUserText =
+    shouldUseUserMessageDisclosure(isUser, renderedContent) && !textSelectionActive
   var userMessageExpanded by rememberSaveable(messageId, messageText) { mutableStateOf(false) }
   val messageSpeech = speechState?.takeIf { it.messageId == messageId }
   val canListen = !live && messageId != null && normalizedRole == "assistant" && messageText.isNotBlank()
@@ -2780,6 +2952,18 @@ internal fun ChatBubble(
     } else {
       null
     }
+  val selectionPress: ((ChatTextPress) -> Unit)? =
+    if (messageId != null && textSelection != null) {
+      { press -> textSelection.enter(messageId, press) }
+    } else {
+      null
+    }
+  LaunchedEffect(textSelectionActive) {
+    if (textSelectionActive) textSelection?.selectInitialSelection()
+  }
+  DisposableEffect(textSelectionActive) {
+    onDispose { if (textSelectionActive) textSelection?.exit() }
+  }
 
   Row(
     modifier = Modifier.fillMaxWidth(),
@@ -2797,12 +2981,13 @@ internal fun ChatBubble(
     ) {
       ChatMessageActionHost(
         text = messageText,
-        onReply = onReplyMessage,
+        onQuote = { onQuoteMessage(ChatQuoteDraft(currentQuoteText(), messageId)) },
+        onSelectText = selectionPress,
         showSessionActions = isUser && entryId != null && sessionActionsEnabled,
         onRewind = entryId?.let { value -> { onRewindMessage(value) } },
         onFork = entryId?.let { value -> { onForkMessage(value) } },
         onShare = onShare,
-        enabled = !live && !selectionActive,
+        enabled = !outputActive && !selectionActive && !anyTextSelection,
         listenActive = messageSpeech?.isActive == true,
         onToggleListen = toggleListen,
       ) {
@@ -2835,112 +3020,124 @@ internal fun ChatBubble(
             },
           verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-          caption?.let {
-            Text(
-              text = it,
-              style = ClawTheme.type.caption.copy(fontSize = 12.sp, lineHeight = 15.sp, fontWeight = FontWeight.Medium),
-              color = ClawTheme.colors.textMuted,
+          quoted?.let { quote ->
+            ChatQuotedMessageLink(
+              onClick = onQuoteLinkClick?.let { click -> { click(quote.quote) } },
             )
           }
-          if (collapsibleUserText && messageText.isNotBlank()) {
-            ChatUserMessageText(
-              textParts = displayableContent.mapNotNull { it.text },
-              plainText = messageText,
-              expanded = userMessageExpanded,
-              onExpandedChange = { userMessageExpanded = it },
-            )
-          }
-          // Only the trailing text block of a freshly arrived answer types itself out.
-          val typewriterPartIndex =
-            if (typewriter == null) -1 else displayableContent.indexOfLast { part -> part.type == "text" }
-          displayableContent.forEachIndexed { partIndex, part ->
-            when {
-              part.type == "thinking" -> {
-                ChatThinkingBlock(
-                  text = part.text.orEmpty(),
-                  streaming = false,
-                  onClick = { onShowThinking(part.text.orEmpty()) },
+          val bubbleBody: @Composable () -> Unit = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+              caption?.let {
+                Text(
+                  text = it,
+                  style = ClawTheme.type.caption.copy(fontSize = 12.sp, lineHeight = 15.sp, fontWeight = FontWeight.Medium),
+                  color = ClawTheme.colors.textMuted,
                 )
               }
+              if (collapsibleUserText && messageText.isNotBlank()) {
+                ChatUserMessageText(
+                  textParts = renderedContent.mapNotNull { it.text },
+                  plainText = messageText,
+                  expanded = userMessageExpanded || textSelectionActive,
+                  onExpandedChange = { userMessageExpanded = it },
+                )
+              }
+              // Only the trailing text block of a freshly arrived answer types itself out.
+              val typewriterPartIndex =
+                if (typewriter == null) -1 else renderedContent.indexOfLast { part -> part.type == "text" }
+              renderedContent.forEachIndexed { partIndex, part ->
+                when {
+                  part.type == "thinking" -> {
+                    ChatThinkingBlock(
+                      text = part.text.orEmpty(),
+                      streaming = false,
+                      onClick = { onShowThinking(part.text.orEmpty()) },
+                    )
+                  }
 
-              part.type == "text" && !collapsibleUserText -> {
-                val rawText = part.text.orEmpty()
-                val typing = partIndex == typewriterPartIndex
-                if (typing && typewriterAnimate) {
-                  LaunchedEffect(rawText, typewriterAnimate) { typewriter?.run(rawText, typewriterAnimate) }
+                  part.type == "text" && !collapsibleUserText -> {
+                    val rawText = part.text.orEmpty()
+                    val typing = partIndex == typewriterPartIndex
+                    if (typing && typewriterAnimate) {
+                      LaunchedEffect(rawText, typewriterAnimate) { typewriter?.run(rawText, typewriterAnimate) }
+                    }
+                    ChatText(
+                      text = if (typing && typewriterAnimate) checkNotNull(typewriter).visible(rawText, typewriterAnimate) else rawText,
+                      textColor = ClawTheme.colors.text,
+                      isStreaming = live,
+                      centered = isUser,
+                    )
+                  }
+
+                  part.type == "text" -> {}
+
+                  part.isAudioAttachment() && part.hasPlayableMediaArtifact() -> {
+                    ChatAudioPlayerCard(
+                      content = part,
+                      playbackBlocked = inlineMediaPlaybackBlocked,
+                      loadMedia = loadMediaArtifact,
+                    )
+                  }
+
+                  part.isVideoAttachment() && part.hasPlayableMediaArtifact() -> {
+                    ChatVideoPlayerCard(
+                      content = part,
+                      playbackBlocked = inlineMediaPlaybackBlocked,
+                      loadMedia = loadMediaArtifact,
+                    )
+                  }
+
+                  part.isAudioAttachment() || part.isVideoAttachment() -> {
+                    ChatMediaAttachmentLabel(content = part)
+                  }
+
+                  part.isImageAttachment() && !part.base64.isNullOrBlank() -> {
+                    ChatBase64Image(base64 = part.base64, mimeType = part.mimeType)
+                  }
+
+                  part.isImageAttachment() && !part.artifactId.isNullOrBlank() -> {
+                    ChatManagedImage(
+                      artifactId = part.artifactId,
+                      label = part.alt?.takeIf(String::isNotBlank) ?: part.fileName ?: nativeString("Image"),
+                      resolverReady = inlineWidgetResolverReady,
+                      loadImage = loadImageArtifact,
+                    )
+                  }
+
+                  part.type == "canvas" && normalizedRole == "assistant" -> {
+                    ChatInlineWidget(
+                      preview = checkNotNull(part.widget),
+                      resolverReady = inlineWidgetResolverReady,
+                      resolveResource = resolveInlineWidgetResource,
+                    )
+                  }
+
+                  else -> {
+                    Text(text = part.fileName ?: nativeString("Attachment"), style = ClawTheme.type.body, color = ClawTheme.colors.textMuted)
+                  }
                 }
-                ChatText(
-                  text = if (typing && typewriterAnimate) checkNotNull(typewriter).visible(rawText, typewriterAnimate) else rawText,
-                  textColor = ClawTheme.colors.text,
-                  isStreaming = live,
-                  centered = isUser,
+              }
+              if (omittedImageCount > 0) {
+                Text(
+                  text = nativeString("Additional images hidden: \${omittedImageCount}", omittedImageCount),
+                  style = ClawTheme.type.caption,
+                  color = ClawTheme.colors.textMuted,
                 )
               }
-
-              part.type == "text" -> {}
-
-              part.isAudioAttachment() && part.hasPlayableMediaArtifact() -> {
-                ChatAudioPlayerCard(
-                  content = part,
-                  playbackBlocked = inlineMediaPlaybackBlocked,
-                  loadMedia = loadMediaArtifact,
+              if (messageId != null) {
+                ChatMessageLinkPreview(messageId = messageId, role = normalizedRole, content = renderedContent)
+              }
+              disclosure()
+              messageSpeech?.let { speech ->
+                FullChatSpeechIndicator(
+                  phase = speech.phase,
+                  onToggle = { onToggleListen(checkNotNull(messageId), messageText) },
                 )
-              }
-
-              part.isVideoAttachment() && part.hasPlayableMediaArtifact() -> {
-                ChatVideoPlayerCard(
-                  content = part,
-                  playbackBlocked = inlineMediaPlaybackBlocked,
-                  loadMedia = loadMediaArtifact,
-                )
-              }
-
-              part.isAudioAttachment() || part.isVideoAttachment() -> {
-                ChatMediaAttachmentLabel(content = part)
-              }
-
-              part.isImageAttachment() && !part.base64.isNullOrBlank() -> {
-                ChatBase64Image(base64 = part.base64, mimeType = part.mimeType)
-              }
-
-              part.isImageAttachment() && !part.artifactId.isNullOrBlank() -> {
-                ChatManagedImage(
-                  artifactId = part.artifactId,
-                  label = part.alt?.takeIf(String::isNotBlank) ?: part.fileName ?: nativeString("Image"),
-                  resolverReady = inlineWidgetResolverReady,
-                  loadImage = loadImageArtifact,
-                )
-              }
-
-              part.type == "canvas" && normalizedRole == "assistant" -> {
-                ChatInlineWidget(
-                  preview = checkNotNull(part.widget),
-                  resolverReady = inlineWidgetResolverReady,
-                  resolveResource = resolveInlineWidgetResource,
-                )
-              }
-
-              else -> {
-                Text(text = part.fileName ?: nativeString("Attachment"), style = ClawTheme.type.body, color = ClawTheme.colors.textMuted)
               }
             }
           }
-          if (omittedImageCount > 0) {
-            Text(
-              text = nativeString("Additional images hidden: \${omittedImageCount}", omittedImageCount),
-              style = ClawTheme.type.caption,
-              color = ClawTheme.colors.textMuted,
-            )
-          }
-          if (messageId != null) {
-            ChatMessageLinkPreview(messageId = messageId, role = normalizedRole, content = displayableContent)
-          }
-          disclosure()
-          messageSpeech?.let { speech ->
-            FullChatSpeechIndicator(
-              phase = speech.phase,
-              onToggle = { onToggleListen(checkNotNull(messageId), messageText) },
-            )
+          CompositionLocalProvider(LocalChatMarkdownNativeSelection provides false) {
+            bubbleBody()
           }
         }
       }
@@ -3055,10 +3252,14 @@ private fun ChatUserMessageText(
   var pendingPlacement by remember(action) { mutableStateOf<CompletableDeferred<IntSize>?>(null) }
   if (preview != null && !expanded) {
     val anchor = rememberChatReaderAnchor(plainText)
+    val hit = rememberChatTextHitTarget()
     Text(
       text = preview,
-      modifier = anchor?.modifier ?: Modifier,
-      onTextLayout = anchor?.onTextLayout,
+      modifier = (anchor?.modifier ?: Modifier).then(hit.modifier),
+      onTextLayout = {
+        hit.onTextLayout(it)
+        anchor?.onTextLayout?.invoke(it)
+      },
       style = ClawTheme.type.body.copy(fontWeight = FontWeight.Normal),
       color = ClawTheme.colors.text,
     )
@@ -3950,7 +4151,7 @@ private fun PlanStepMarker(status: ChatPlanStepStatus) {
 }
 
 @Composable
-private fun chatDraftStyle(): TextStyle = ClawTheme.type.body.copy(fontSize = 16.sp, lineHeight = 22.sp)
+internal fun chatDraftStyle(): TextStyle = ClawTheme.type.body.copy(fontSize = 16.sp, lineHeight = 22.sp)
 
 @Composable
 private fun chatProjectStyle(): TextStyle = ClawTheme.type.caption.copy(fontSize = 11.sp, lineHeight = 13.sp, fontWeight = FontWeight.Normal)
@@ -3965,17 +4166,44 @@ private fun minimumChatLineHeight(style: TextStyle): Int {
   return maxOf(measured, with(LocalDensity.current) { ceil(style.lineHeight.toPx()).toInt() })
 }
 
+/**
+ * The room the transcript reserves under its last row so the newest message
+ * stays clear of the composer. It tracks the bar the style actually draws: the
+ * classic bar is two rows tall, the simple bar one, and reserving the classic
+ * height behind a one-row bar leaves a bare canvas band under the glass.
+ */
 @Composable
-private fun minimumChatInputHeight(): Dp {
-  val lineHeight = minimumChatLineHeight(chatDraftStyle())
-  return with(LocalDensity.current) {
-    // Match each separately rounded editor/action padding and the text's full pixel line.
-    (
-      maxOf(ClawTheme.spacing.touchTarget.roundToPx(), lineHeight + 8.dp.roundToPx() + 4.dp.roundToPx()) +
-        ClawTheme.spacing.touchTarget.roundToPx() + 4.dp.roundToPx() * 2
-    ).toDp()
+internal fun minimumChatInputHeight(composerStyle: ComposerBarStyle = ComposerBarStyle.Classic): Dp =
+  when (composerStyle) {
+    ComposerBarStyle.Simple -> SimpleComposerBarHeight
+    ComposerBarStyle.Classic -> {
+      val lineHeight = minimumChatLineHeight(chatDraftStyle())
+      with(LocalDensity.current) {
+        // Match each separately rounded editor/action padding and the text's full pixel line.
+        (
+          maxOf(ClawTheme.spacing.touchTarget.roundToPx(), lineHeight + 8.dp.roundToPx() + 4.dp.roundToPx()) +
+            ClawTheme.spacing.touchTarget.roundToPx() + 4.dp.roundToPx() * 2
+        ).toDp()
+      }
+    }
   }
-}
+
+/**
+ * Distance from the pane's bottom edge that keeps the transcript's newest row
+ * and the floating chat pills clear of the composer. The simple bar rides the
+ * gesture area, so its clearance adds the nav inset and the pane's 4dp float
+ * gap on top of the one-line bar plus a breathing margin; the classic bar is
+ * already covered by [minimumChatInputHeight].
+ */
+@Composable
+internal fun chatComposerClearance(
+  composerStyle: ComposerBarStyle,
+  composerBottomInset: Dp,
+): Dp =
+  when (composerStyle) {
+    ComposerBarStyle.Simple -> composerBottomInset + SimpleComposerBarHeight + 16.dp
+    ComposerBarStyle.Classic -> 10.dp + minimumChatInputHeight(composerStyle)
+  }
 
 @Composable
 private fun ChatComposer(
@@ -4034,6 +4262,13 @@ private fun ChatComposer(
   dictationEnabled: Boolean,
   onToggleDictation: () -> Unit,
   talkActive: Boolean,
+  liveTalkVisible: Boolean,
+  voiceInputVisible: Boolean,
+  composerStyle: ComposerBarStyle,
+  simpleMenu: SimpleComposerMenuState,
+  selectedModelRef: String?,
+  onSelectThinkingLevel: (String) -> Unit,
+  onOpenFullScreenEditor: () -> Unit,
   onToggleTalk: () -> Unit,
   onFixConnection: () -> Unit,
   onOpenProvidersModels: () -> Unit,
@@ -4044,6 +4279,9 @@ private fun ChatComposer(
   hazeState: HazeState? = null,
   /** Swallows every touch on the composer while the share picker owns the screen. */
   interactionLocked: Boolean = false,
+  quote: ChatQuoteDraft? = null,
+  onClearQuote: () -> Unit = {},
+  focusRequestId: Int = 0,
 ) {
   val slashCommands =
     remember(value, commands) {
@@ -4051,7 +4289,7 @@ private fun ChatComposer(
     }
   val dictationActive =
     dictationState is ChatDictationState.Starting || dictationState is ChatDictationState.Listening
-  val hasContent = value.trim().isNotEmpty() || attachments.isNotEmpty()
+  val hasContent = value.trim().isNotEmpty() || attachments.isNotEmpty() || quote != null
   // Offline sends queue durably too (text, images, and voice notes), so the gate is identical
   // to the connected one; admission errors keep the draft when the durable queue refuses it.
   val sendEnabled =
@@ -4064,6 +4302,75 @@ private fun ChatComposer(
       dictationActive = dictationActive,
       modelUnavailable = modelUnavailableMessage != null,
     )
+
+  val simpleMenuTrigger = rememberClawMorphTrigger(simpleMenu.morph)
+  val simpleMenuModelOptions =
+    remember(modelSections) {
+      (modelSections.pinned + modelSections.recent + modelSections.remaining)
+        .distinctBy { it.providerQualifiedRef() }
+    }
+  val simpleMenuThinkingLabel =
+    thinkingOptions
+      .firstOrNull { it.id.trim().equals(thinkingLevel.trim(), ignoreCase = true) }
+      ?.let(::chatThinkingOptionLabel)
+      ?: thinkingLevel.ifBlank { nativeString("Off") }
+  val latestModelLabel = rememberUpdatedState(selectedModelLabel)
+  val latestModelEnabled = rememberUpdatedState(modelPickerEnabled && !modelSelectionLocked)
+  val latestThinkingLabel = rememberUpdatedState(simpleMenuThinkingLabel)
+  val latestThinkingEnabled = rememberUpdatedState(thinkingSupported && thinkingLevelEnabled)
+  val latestSelectedModelRef = rememberUpdatedState(selectedModelRef)
+  val latestThinkingLevel = rememberUpdatedState(thinkingLevel)
+  val openSimpleMenu: () -> Unit = {
+    if (!simpleMenu.morph.expanded) {
+      simpleMenu.prepareOpen()
+      // The disc itself swells into the card (see simpleComposerButtonMorph)
+      // while the overlay grows the crisp glass from the same bottom-left pin.
+      simpleMenuTrigger.open(
+        origin = TransformOrigin(0f, 1f),
+        panelWidth = SimpleComposerMenuPanelWidth,
+      ) {
+        SimpleComposerMenuPrimaryContent(
+          state = simpleMenu,
+          modelLabel = latestModelLabel.value,
+          modelEnabled = latestModelEnabled.value,
+          modelBody = {
+            SimpleComposerModelOptions(
+              models = simpleMenuModelOptions,
+              selectedRef = latestSelectedModelRef.value,
+              onSelect = { ref ->
+                onSelectModel(ref)
+                simpleMenu.endDrill()
+              },
+            )
+          },
+          thinkingLabel = latestThinkingLabel.value,
+          thinkingEnabled = latestThinkingEnabled.value,
+          thinkingBody = {
+            SimpleComposerThinkingOptions(
+              options = thinkingOptions,
+              selectedId = latestThinkingLevel.value,
+              onSelect = { level ->
+                onSelectThinkingLevel(level)
+                simpleMenu.endDrill()
+              },
+            )
+          },
+          onCamera = {
+            simpleMenu.closeAll()
+            onCapturePhoto()
+          },
+          onPhotos = {
+            simpleMenu.closeAll()
+            onPickImages()
+          },
+          onFiles = {
+            simpleMenu.closeAll()
+            onPickAudioOrDocument()
+          },
+        )
+      }
+    }
+  }
 
   val attachedProgress = progressCard != null && voiceNoteState !is VoiceNoteRecorderState.Recording && voiceNoteState !is VoiceNoteRecorderState.Preparing
   val auxiliaryContent: @Composable (Dp) -> Unit = { availableHeight ->
@@ -4140,7 +4447,7 @@ private fun ChatComposer(
   }
 
   BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-    val inputHeightLimit = if (compactHeight) maxHeight else maxOf(minimumChatInputHeight(), maxHeight - ClawTheme.spacing.touchTarget)
+    val inputHeightLimit = if (compactHeight) maxHeight else maxOf(minimumChatInputHeight(composerStyle), maxHeight - ClawTheme.spacing.touchTarget)
     Column(
       modifier = if (detailsExpanded) Modifier.clearAndSetSemantics {} else Modifier,
       verticalArrangement = Arrangement.spacedBy(if (attachedProgress && !compactHeight && !detailsExpanded) (-18).dp else 4.dp),
@@ -4172,22 +4479,82 @@ private fun ChatComposer(
         } else if (voiceNoteState is VoiceNoteRecorderState.Preparing) {
           VoiceNotePreparing(modifier = Modifier.weight(1f))
         } else {
-          ChatInputPill(
-            inputEnabled = !detailsExpanded,
-            gatewayConnecting = gatewayConnecting,
-            onOpenDetails = if (compactHeight) ({ onDetailsExpandedChange(true) }) else null,
-            value = value,
-            onValueChange = onValueChange,
-            onPickImages = onPickImages,
-            onPickAudioOrDocument = onPickAudioOrDocument,
-            onPickVideo = onPickVideo,
-            onCapturePhoto = onCapturePhoto,
-            onStartVoiceNote = onStartVoiceNote,
-            recordVoiceNoteEnabled = recordVoiceNoteEnabled,
+          Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            // The last quote survives dismissal so the capsule can animate out with its text.
+            var lastQuote by remember { mutableStateOf(quote) }
+            if (quote != null) lastQuote = quote
+            AnimatedVisibility(
+              visible = quote != null,
+              // Drops in from above with a soft overshoot, and retracts the same way on close.
+              enter =
+                slideInVertically(
+                  animationSpec = spring(dampingRatio = 0.55f, stiffness = 420f),
+                  initialOffsetY = { height -> -height / 3 },
+                ) + fadeIn(animationSpec = tween(120)),
+              exit =
+                slideOutVertically(
+                  animationSpec = spring(dampingRatio = 0.7f, stiffness = 420f),
+                  targetOffsetY = { height -> -height / 3 },
+                ) + fadeOut(animationSpec = tween(110)),
+            ) {
+              lastQuote?.let { currentQuote ->
+                ChatQuoteCapsule(
+                  quote = currentQuote,
+                  onRemove = onClearQuote,
+                  hazeState = hazeState,
+                  modifier = Modifier.fillMaxWidth(),
+                )
+              }
+            }
+            if (composerStyle == ComposerBarStyle.Simple) {
+              SimpleComposerBar(
+                inputEnabled = !detailsExpanded,
+                gatewayConnecting = gatewayConnecting,
+                value = value,
+                onValueChange = onValueChange,
+                focusRequestId = focusRequestId,
+                hasContent = hasContent,
+                sendEnabled = sendEnabled,
+                onSend = onSend,
+                runActive = pendingRunCount > 0,
+                sendInFlight = sendInFlight,
+                onAbort = onAbort,
+                talkActive = talkActive,
+                onToggleTalk = onToggleTalk,
+                onOpenMenu = {
+                  if (simpleMenu.morph.expanded) {
+                    simpleMenu.closeAll()
+                  } else {
+                    openSimpleMenu()
+                  }
+                },
+                onExpandEditor = onOpenFullScreenEditor,
+                plusTriggerModifier = simpleMenuTrigger.modifier,
+                hazeState = hazeState,
+                modifier = Modifier.fillMaxWidth(),
+              )
+            } else {
+            ChatInputPill(
+              inputEnabled = !detailsExpanded,
+              gatewayConnecting = gatewayConnecting,
+              onOpenDetails = if (compactHeight) ({ onDetailsExpandedChange(true) }) else null,
+              value = value,
+              onValueChange = onValueChange,
+              onPickImages = onPickImages,
+              onPickAudioOrDocument = onPickAudioOrDocument,
+              onPickVideo = onPickVideo,
+              onCapturePhoto = onCapturePhoto,
+              onStartVoiceNote = onStartVoiceNote,
+              recordVoiceNoteEnabled = recordVoiceNoteEnabled,
             dictationActive = dictationActive,
             dictationEnabled = dictationEnabled,
             onToggleDictation = onToggleDictation,
             talkActive = talkActive,
+            liveTalkVisible = liveTalkVisible,
+            voiceInputVisible = voiceInputVisible,
             onToggleTalk = onToggleTalk,
             runActive = pendingRunCount > 0,
             sendInFlight = sendInFlight,
@@ -4215,8 +4582,11 @@ private fun ChatComposer(
             onOpenEffortPicker = onOpenEffortPicker,
             contextUsage = contextUsage,
             hazeState = hazeState,
-            modifier = Modifier.weight(1f),
-          )
+            modifier = Modifier.fillMaxWidth(),
+            focusRequestId = focusRequestId,
+            )
+            }
+          }
         }
       }
     }
@@ -5120,6 +5490,8 @@ private fun ChatInputPill(
   dictationEnabled: Boolean,
   onToggleDictation: () -> Unit,
   talkActive: Boolean,
+  liveTalkVisible: Boolean,
+  voiceInputVisible: Boolean,
   onToggleTalk: () -> Unit,
   runActive: Boolean,
   sendInFlight: Boolean,
@@ -5146,8 +5518,8 @@ private fun ChatInputPill(
   contextUsage: ChatContextUsage,
   hazeState: HazeState? = null,
   modifier: Modifier = Modifier,
+  focusRequestId: Int = 0,
 ) {
-  val hardwareEnterHandler = remember { PhysicalChatSendKeyHandler() }
   val keyboardController = LocalSoftwareKeyboardController.current
   val focusManager = LocalFocusManager.current
   fun dismissKeyboardForPicker() {
@@ -5243,81 +5615,66 @@ private fun ChatInputPill(
       // second grey stroke on top of the glass tint read as a dirty rim.
       modifier = Modifier.clip(RoundedCornerShape(26.dp)),
     ) {
-      ChatTextFieldValueAdapter(
-        value = value,
-        onValueChange = onValueChange,
-        keyHandler = hardwareEnterHandler,
-      ) { textFieldValue, updateTextFieldValue ->
-        BasicTextField(
-          value = textFieldValue,
-          enabled = inputEnabled,
-          // A pending IME callback must not edit the draft behind Details.
-          onValueChange = { if (inputEnabled) updateTextFieldValue(it) },
-          textStyle = draftStyle.copy(color = ClawTheme.colors.text),
-          cursorBrush = SolidColor(ClawTheme.colors.primary),
-          minLines = 1,
-          maxLines = 6,
-          modifier =
-            Modifier
-              .fillMaxWidth()
-              // Reserve the action row before measuring the draft in the IME viewport.
-              .weight(1f, fill = false)
-              .heightIn(min = ClawTheme.spacing.touchTarget)
-              .padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 4.dp)
-              .onPreInterceptKeyBeforeSoftKeyboard { event ->
-                inputEnabled &&
-                  hardwareEnterHandler.handle(
-                    event = event,
-                    sendEnabled = sendEnabled,
-                    textEmpty = textFieldValue.text.isEmpty(),
-                    compositionActive = textFieldValue.composition != null,
-                    onSend = onSend,
-                  )
-              },
-          decorationBox = { innerTextField ->
-            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
-              if (value.isEmpty()) {
-                // BasicTextField's line limit does not constrain its decoration.
-              AnimatedContent(
-                targetState = gatewayConnecting,
-                transitionSpec = {
-                  (fadeIn(animationSpec = tween(220)) + scaleIn(initialScale = 0.98f, animationSpec = tween(220))) togetherWith
-                    fadeOut(animationSpec = tween(160))
-                },
-                label = "gateway connection placeholder",
-              ) { connecting ->
-                if (connecting) {
-                  Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                  ) {
-                    CircularProgressIndicator(
-                      modifier = Modifier.size(14.dp),
-                      strokeWidth = 1.8.dp,
-                      color = ClawTheme.colors.textMuted,
-                    )
-                    Text(
-                      text = nativeString("Connecting…"),
-                      style = draftStyle,
-                      color = ClawTheme.colors.textMuted,
-                      maxLines = 1,
-                      overflow = TextOverflow.Ellipsis,
-                    )
-                  }
-                } else {
-                  Text(
-                    text = nativeString("Message OpenClaw"),
-                    style = draftStyle,
-                    color = ClawTheme.colors.textMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                  )
-                }
+      Box(
+        modifier =
+          Modifier
+            .fillMaxWidth()
+            // Reserve the action row before measuring the draft in the IME viewport.
+            .weight(1f, fill = false)
+            .heightIn(min = ClawTheme.spacing.touchTarget)
+            // 18dp puts the caret and placeholder on the same vertical line as
+            // the ＋ icon's left edge (4dp row inset + 14dp icon inset).
+            .padding(start = 18.dp, end = 14.dp, top = 8.dp, bottom = 4.dp),
+        contentAlignment = Alignment.CenterStart,
+      ) {
+        if (value.isEmpty()) {
+          AnimatedContent(
+            targetState = gatewayConnecting,
+            transitionSpec = {
+              (fadeIn(animationSpec = tween(220)) + scaleIn(initialScale = 0.98f, animationSpec = tween(220))) togetherWith
+                fadeOut(animationSpec = tween(160))
+            },
+            label = "gateway connection placeholder",
+          ) { connecting ->
+            if (connecting) {
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+              ) {
+                CircularProgressIndicator(
+                  modifier = Modifier.size(14.dp),
+                  strokeWidth = 1.8.dp,
+                  color = ClawTheme.colors.textMuted,
+                )
+                Text(
+                  text = nativeString("Connecting…"),
+                  style = draftStyle,
+                  color = ClawTheme.colors.textMuted,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
               }
+            } else {
+              Text(
+                text = nativeString("Message OpenClaw"),
+                style = draftStyle,
+                color = ClawTheme.colors.textMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
             }
-              innerTextField()
-            }
-          },
+          }
+        }
+        ChatComposerEditText(
+          value = value,
+          onValueChange = onValueChange,
+          enabled = inputEnabled,
+          textStyle = draftStyle.copy(color = ClawTheme.colors.text),
+          cursorColor = ClawTheme.colors.primary,
+          sendEnabled = sendEnabled,
+          onSend = onSend,
+          focusRequestId = focusRequestId,
+          modifier = Modifier.fillMaxWidth(),
         )
       }
       Row(
@@ -5378,9 +5735,9 @@ private fun ChatInputPill(
             )
           }
         }
-        if (talkActive) {
+        if (liveTalkVisible && talkActive) {
           LiveTalkButton(active = true, onClick = onToggleTalk)
-        } else {
+        } else if (voiceInputVisible) {
           ChatComposerMicButton(
             dictationActive = dictationActive,
             dictationEnabled = dictationEnabled,
@@ -5389,20 +5746,21 @@ private fun ChatInputPill(
             onStartVoiceNote = onStartVoiceNote,
           )
         }
-        when (
-          resolveChatComposerPrimaryAction(
-            talkActive = talkActive,
-            runActive = runActive,
-            sendInFlight = sendInFlight,
-            hasContent = hasContent,
-          )
-        ) {
-          ChatComposerPrimaryAction.Send -> SendButton(enabled = inputEnabled && sendEnabled, onClick = onSend)
-          ChatComposerPrimaryAction.Preparing -> PreparingSendButton()
-          ChatComposerPrimaryAction.StartTalk -> LiveTalkButton(active = false, onClick = onToggleTalk)
-          ChatComposerPrimaryAction.Stop -> StopButton(onClick = onAbort)
-          ChatComposerPrimaryAction.None -> Unit
-        }
+        ChatComposerPrimaryActionSlot(
+          action =
+            resolveChatComposerPrimaryAction(
+              talkActive = talkActive,
+              runActive = runActive,
+              sendInFlight = sendInFlight,
+              hasContent = hasContent,
+              liveTalkVisible = liveTalkVisible,
+            ),
+          sendEnabled = inputEnabled && sendEnabled,
+          onSend = onSend,
+          onAbort = onAbort,
+          onToggleTalk = onToggleTalk,
+          modifier = Modifier.size(ClawTheme.spacing.touchTarget),
+        )
       }
     }
   }
@@ -5652,7 +6010,7 @@ private fun ChatComposerModelPicker(
 }
 
 @Composable
-private fun LiveTalkButton(
+internal fun LiveTalkButton(
   active: Boolean,
   onClick: () -> Unit,
 ) {
@@ -5674,16 +6032,33 @@ private fun LiveTalkButton(
 }
 
 @Composable
-private fun StopButton(onClick: () -> Unit) {
+internal fun StopButton(onClick: () -> Unit) {
   Surface(
     onClick = onClick,
     modifier = Modifier.size(ClawTheme.spacing.touchTarget),
     shape = CircleShape,
     color = Color.Transparent,
-    contentColor = ClawTheme.colors.danger,
   ) {
-    Box(modifier = Modifier.padding(8.dp).background(ClawTheme.colors.dangerSoft, CircleShape), contentAlignment = Alignment.Center) {
-      Icon(imageVector = Icons.Default.Stop, contentDescription = nativeString("Stop"), modifier = Modifier.size(20.dp))
+    // HyperOS run-stop: a light disc with a heavy ring and a rounded square in
+    // the middle, not a filled disc with a pause glyph. Same 32dp disc as the
+    // send button so the slot never changes size between states.
+    Box(
+      modifier =
+        Modifier
+          .padding(8.dp)
+          .size(32.dp)
+          .clip(CircleShape)
+          .background(ClawTheme.colors.surface)
+          .border(3.dp, ClawTheme.colors.danger, CircleShape),
+      contentAlignment = Alignment.Center,
+    ) {
+      Box(
+        modifier =
+          Modifier
+            .size(10.dp)
+            .clip(RoundedCornerShape(3.dp))
+            .background(ClawTheme.colors.danger),
+      )
     }
   }
 }
@@ -5901,8 +6276,33 @@ internal fun resolveChatContextUsage(
   )
 }
 
+/**
+ * Miuix's extended set has no plain up arrow: "Share" is an arrow out of a tray,
+ * "Forward" is diagonal, and the rest are chevrons. This follows the same 24dp
+ * grid with a heavier round stroke, matching the HyperOS send glyph's chunky
+ * shaft and wide head rather than Material's thin filled arrow.
+ */
+internal val ComposerSendArrow: ImageVector by lazy {
+  ImageVector
+    .Builder(
+      name = "ComposerSendArrow",
+      defaultWidth = 24.dp,
+      defaultHeight = 24.dp,
+      viewportWidth = 24f,
+      viewportHeight = 24f,
+    ).apply {
+      addPath(
+        pathData = PathParser().parsePathString("M12 18.5V6M4.8 12.8 12 5.6l7.2 7.2").toNodes(),
+        stroke = SolidColor(Color.Black),
+        strokeLineWidth = 3f,
+        strokeLineCap = StrokeCap.Round,
+        strokeLineJoin = StrokeJoin.Round,
+      )
+    }.build()
+}
+
 @Composable
-private fun SendButton(
+internal fun SendButton(
   enabled: Boolean,
   onClick: () -> Unit,
 ) {
@@ -5915,13 +6315,13 @@ private fun SendButton(
     contentColor = if (enabled) ClawTheme.colors.primaryText else ClawTheme.colors.textSubtle,
   ) {
     Box(modifier = Modifier.padding(8.dp).background(if (enabled) ClawTheme.colors.primary else ClawTheme.colors.surfacePressed, CircleShape), contentAlignment = Alignment.Center) {
-      Icon(imageVector = Icons.Default.ArrowUpward, contentDescription = nativeString("Send"), modifier = Modifier.size(20.dp))
+      Icon(imageVector = ComposerSendArrow, contentDescription = nativeString("Send"), modifier = Modifier.size(22.dp))
     }
   }
 }
 
 @Composable
-private fun PreparingSendButton() {
+internal fun PreparingSendButton() {
   Surface(
     modifier = Modifier.size(ClawTheme.spacing.touchTarget),
     shape = CircleShape,

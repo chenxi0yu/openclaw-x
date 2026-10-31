@@ -1723,4 +1723,9 @@
     <string name="native_ffaed354e7fe5514" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"OpenClaw 将此手机变为简洁的移动控制界面，用于管理对话、语音、提供商和 Gateway。"</string>
     <string name="native_ffb6f5764bddb68c" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"最新优先"</string>
     <string name="native_ffcf16006c652ee3" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"下一个周期"</string>
+    <string name="native_7d28f801df95601a" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"追问"</string>
+    <string name="native_eb4cdebd82bf1194" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"引用"</string>
+    <string name="native_68c3261b08e94f12" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"已引用前方内容"</string>
+    <string name="native_2c85efad67614491" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"移除引用"</string>
+    <string name="native_e64a6259d78c4caa" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"原消息不在当前对话中"</string>
 </resources>

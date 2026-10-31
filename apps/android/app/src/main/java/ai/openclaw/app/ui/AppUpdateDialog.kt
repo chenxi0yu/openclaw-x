@@ -2,6 +2,8 @@ package ai.openclaw.app.ui
 
 import ai.openclaw.app.BuildConfig
 import ai.openclaw.app.update.AppUpdateRelease
+import ai.openclaw.app.update.enqueueApkDownload
+import ai.openclaw.app.ui.chat.ChatMarkdown
 import ai.openclaw.app.ui.design.ClawTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -15,18 +17,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.unit.dp
-import android.content.ClipData
-import android.content.ClipboardManager
+import android.content.Context
 import android.widget.Toast
 
 /**
  * 启动检查发现新版本时弹出的更新对话框。
  *
- * “马上更新”会在浏览器里打开从 Release 说明中提取到的分享链接，并把链接旁的
- * 密码写入剪贴板，随后提示“验证码已复制”，用户在浏览器里粘贴即可下载。
- * 没有可复制链接时该按钮只做关闭，避免误导性的复制提示。
+ * Release 带安装包附件时，“立即下载”把它交给系统下载器，下载器自己的通知负责进度和安装；
+ * 没有附件时退到 Release 发布页，让用户自己在页面上取包——任何一条 Release 都不会把更新
+ * 路径断在这里。
  */
 @Composable
 internal fun AppUpdateDialog(
@@ -66,45 +67,22 @@ internal fun AppUpdateDialog(
         }
 
         if (release.notes.isNotBlank()) {
+          // The chat renderer already covers headings, lists, emphasis, inline code and
+          // fenced code; release bodies are authored in the same Markdown. SelectionContainer
+          // stays so a rendered body remains copyable, which the markdown text itself is not.
           SelectionContainer {
-            Text(
-              text = release.notes,
-              style = ClawTheme.type.body,
-              color = ClawTheme.colors.textMuted,
-            )
+            ChatMarkdown(text = release.notes, textColor = ClawTheme.colors.textMuted)
           }
         }
 
         if (downloadUrl == null) {
-          // Naming the fix keeps this from being a dead button; the release exists but
-          // its notes carry no link this build's match rule can find.
+          // The release exists but carries no APK attachment; opening its page still gets the
+          // operator to the files.
           Text(
-            text = "这条 Release 的说明里没找到下载链接。请在说明中补上分享链接，或在设置里调整链接匹配规则。",
+            text = "这条 Release 没有附带安装包，打开发布页即可取包。",
             style = ClawTheme.type.caption,
             color = ClawTheme.colors.warning,
           )
-        } else {
-          Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(text = "下载地址", style = ClawTheme.type.caption, color = ClawTheme.colors.textSubtle)
-            SelectionContainer {
-              Text(
-                text = downloadUrl,
-                style = ClawTheme.type.caption.copy(fontFamily = FontFamily.Monospace),
-                color = ClawTheme.colors.text,
-              )
-            }
-          }
-        }
-
-        release.downloadPassword?.let { password ->
-          Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(text = "提取密码", style = ClawTheme.type.caption, color = ClawTheme.colors.textSubtle)
-            Text(
-              text = password,
-              style = ClawTheme.type.body.copy(fontFamily = FontFamily.Monospace),
-              color = ClawTheme.colors.text,
-            )
-          }
         }
       }
     },
@@ -113,35 +91,38 @@ internal fun AppUpdateDialog(
         Text("取消")
       }
       TextButton(
-        enabled = downloadUrl != null,
         onClick = {
-          startAppUpdateDownload(context, uriHandler, requireNotNull(downloadUrl), release.downloadPassword)
+          startAppUpdateDownload(context, uriHandler, release)
           onDismiss()
         },
       ) {
-        Text("马上更新")
+        Text(if (downloadUrl == null) "打开发布页" else "立即下载")
       }
     },
   )
 }
 
 /**
- * Opens the share link in the browser and stages its password on the clipboard.
+ * Hands the release's own APK to the system downloader, which owns progress, retry, and the
+ * completed notification that opens the installer.
  *
- * Kept out of composition so the click handler stays a boring call. The toast fires
- * only when a password was actually copied; otherwise "验证码已复制" would lie.
+ * Kept out of composition so the click handler stays a boring call. A device without a
+ * downloader, or a release with no attachment, ends on the release page instead of a tap that
+ * does nothing.
  */
 private fun startAppUpdateDownload(
-  context: android.content.Context,
-  uriHandler: androidx.compose.ui.platform.UriHandler,
-  downloadUrl: String,
-  password: String?,
+  context: Context,
+  uriHandler: UriHandler,
+  release: AppUpdateRelease,
 ) {
-  // A link the browser cannot handle must not crash the dialog; the download step is best-effort.
-  runCatching { uriHandler.openUri(downloadUrl) }
-  if (!password.isNullOrBlank()) {
-    val clipboard = context.getSystemService(ClipboardManager::class.java)
-    clipboard?.setPrimaryClip(ClipData.newPlainText("OpenClaw update password", password))
-    Toast.makeText(context, "验证码已复制", Toast.LENGTH_SHORT).show()
+  val downloadUrl = release.downloadUrl
+  if (downloadUrl != null && enqueueApkDownload(context, downloadUrl, release.version)) {
+    Toast.makeText(context, "已开始下载，完成后点通知安装", Toast.LENGTH_LONG).show()
+    return
   }
+  if (downloadUrl != null) {
+    Toast.makeText(context, "系统下载器不可用，改从发布页取包", Toast.LENGTH_SHORT).show()
+  }
+  // A link the browser cannot handle must not crash the dialog; the fallback step is best-effort.
+  runCatching { uriHandler.openUri(release.pageUrl) }
 }

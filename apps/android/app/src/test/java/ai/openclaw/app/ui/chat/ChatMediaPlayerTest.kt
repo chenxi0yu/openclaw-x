@@ -146,7 +146,7 @@ class ChatMediaPlayerTest {
         live = false,
         content = listOf(audio, video),
         timestampMs = null,
-        onReplyMessage = {},
+        onQuoteMessage = {},
         sessionActionsEnabled = false,
         onRewindMessage = {},
         onForkMessage = {},

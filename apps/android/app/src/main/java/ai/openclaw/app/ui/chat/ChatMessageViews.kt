@@ -9,9 +9,12 @@ import ai.openclaw.app.chat.normalizeVisibleChatMessageRole
 import ai.openclaw.app.gateway.GatewayLoadedImage
 import ai.openclaw.app.i18n.nativeString
 import ai.openclaw.app.i18n.nativeStringResource
+import ai.openclaw.app.ui.design.ClawPlainIconButton
 import ai.openclaw.app.ui.design.ClawTheme
 import ai.openclaw.app.ui.image.RemoteImageResult
 import ai.openclaw.app.ui.image.safeRemoteImageStore
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Copy as MiuixCopy
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -289,13 +292,15 @@ fun ChatTypingIndicatorBubble(
 
 /** Queued/failed offline command with inline retry/delete controls; rendered as a user bubble. */
 @Composable
-fun ChatOutboxBubble(
+internal fun ChatOutboxBubble(
   item: ChatOutboxItem,
   retryEnabled: Boolean = true,
   onRetry: () -> Unit,
   onDelete: () -> Unit,
+  onQuoteLinkClick: ((String) -> Unit)? = null,
 ) {
   val failed = item.status == ChatOutboxStatus.Failed
+  val quote = splitLeadingChatQuote(item.text)
   val statusColor = if (failed) ClawTheme.colors.danger else ClawTheme.colors.warning
   val statusLabel =
     when (item.status) {
@@ -332,8 +337,12 @@ fun ChatOutboxBubble(
     speaker = nativeString("You"),
     borderColor = statusColor.copy(alpha = 0.6f),
   ) {
-    if (item.text.isNotBlank()) {
-      ChatMarkdown(text = item.text, textColor = ClawTheme.colors.text)
+    quote?.let { split ->
+      ChatQuotedMessageLink(onClick = onQuoteLinkClick?.let { click -> { click(split.quote) } })
+    }
+    val body = quote?.body ?: item.text
+    if (body.isNotBlank()) {
+      ChatMarkdown(text = body, textColor = ClawTheme.colors.text)
     }
     item.attachments.forEach { attachment ->
       Text(
@@ -563,6 +572,8 @@ fun ChatCodeBlock(
       if (isComplete) buildHighlightedCode(display, language, tokenColors) else AnnotatedString(display)
     }
   val ranges = remember(display) { chatTextLayoutRanges(display, maxLines = 256) }
+  val context = LocalContext.current
+  val nativeSelection = LocalChatMarkdownNativeSelection.current
   Surface(
     shape = RoundedCornerShape(8.dp),
     color = ClawTheme.colors.codeBg,
@@ -570,15 +581,31 @@ fun ChatCodeBlock(
     modifier = Modifier.fillMaxWidth(),
   ) {
     Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-      if (!language.isNullOrBlank()) {
-        Text(
-          text = language.uppercase(Locale.US),
-          style = ClawTheme.type.captionSmall,
-          color = ClawTheme.colors.textMuted,
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        if (!language.isNullOrBlank()) {
+          Text(
+            text = language.uppercase(Locale.US),
+            style = ClawTheme.type.captionSmall,
+            color = ClawTheme.colors.textMuted,
+          )
+        }
+        Spacer(Modifier.weight(1f))
+        ClawPlainIconButton(
+          icon = MiuixIcons.Medium.MiuixCopy,
+          contentDescription = nativeString("Copy code"),
+          onClick = { copyChatText(context, code) },
+          modifier = Modifier.size(30.dp),
         )
       }
       if (ranges.size == 1) {
-        SelectionContainer {
+        if (nativeSelection) {
+          SelectionContainer {
+            ChatCodeText(highlighted, rememberChatReaderAnchor())
+          }
+        } else {
           ChatCodeText(highlighted, rememberChatReaderAnchor())
         }
       } else {
@@ -586,7 +613,6 @@ fun ChatCodeBlock(
         val action = key(display) { rememberChatReaderAction() }
         val requester = remember { BringIntoViewRequester() }
         val viewportAnchor = rememberChatReaderAnchor(display)
-        val context = LocalContext.current
         LaunchedEffect(scroll, action) {
           scroll.interactionSource.interactions.collect { interaction ->
             if (interaction is DragInteraction.Start) action.pause()
@@ -612,7 +638,6 @@ fun ChatCodeBlock(
             }
           }) { Text(nativeString("End of code")) }
         }
-        TextButton(onClick = { copyChatText(context, code) }) { Text(nativeString("Copy code")) }
         // Quoted Markdown asks for intrinsic height; the fixed viewport answers that
         // without forwarding an unsupported intrinsic query into the lazy layout.
         LazyColumn(
@@ -648,7 +673,11 @@ fun ChatCodeBlock(
             // A separator-only range before an over-budget grapheme is already
             // represented by its neighbors; an empty Text would add a blank line.
             if (visibleStart <= visibleEnd) {
-              SelectionContainer {
+              if (nativeSelection) {
+                SelectionContainer {
+                  ChatCodeText(highlighted.subSequence(visibleStart, visibleEnd))
+                }
+              } else {
                 ChatCodeText(highlighted.subSequence(visibleStart, visibleEnd))
               }
             }
@@ -666,14 +695,22 @@ private fun ChatCodeText(
   text: AnnotatedString,
   anchor: ChatReaderAnchor? = null,
 ) {
+  val hit = rememberChatTextHitTarget()
+  // Chemistry and unit strings use superscript signs the platform monospace font
+  // may not carry; the app font covers them.
+  val fallbackFamily = ClawTheme.type.body.fontFamily
+  val display = remember(text, fallbackFamily) { text.withScriptGlyphFallback(fallbackFamily) }
   Text(
-    text = text,
+    text = display,
     fontFamily = FontFamily.Monospace,
     // Every layout is part of the same code block; trimming each fragment's first
     // and last line would change spacing at otherwise invisible boundaries.
     style = ClawTheme.type.body.copy(lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Proportional, LineHeightStyle.Trim.None)),
     color = ClawTheme.colors.codeText,
-    modifier = anchor?.modifier ?: Modifier,
-    onTextLayout = anchor?.onTextLayout ?: {},
+    modifier = (anchor?.modifier ?: Modifier).then(hit.modifier),
+    onTextLayout = {
+      hit.onTextLayout(it)
+      anchor?.onTextLayout?.invoke(it)
+    },
   )
 }

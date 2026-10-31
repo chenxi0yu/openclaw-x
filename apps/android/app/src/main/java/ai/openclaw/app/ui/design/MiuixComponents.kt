@@ -51,6 +51,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -148,11 +149,14 @@ internal fun MiuixGroupLabel(
 
 /** Inset hairline that visually starts beside the row content, after the icon column. */
 @Composable
-internal fun MiuixGroupDivider() {
+internal fun MiuixGroupDivider(
+  modifier: Modifier = Modifier,
+  startInset: Dp = MiuixRowHorizontalPadding + MiuixChipSize + 12.dp,
+) {
   Box(
     modifier =
-      Modifier
-        .padding(start = MiuixRowHorizontalPadding + MiuixChipSize + 12.dp)
+      modifier
+        .padding(start = startInset)
         .fillMaxWidth()
         .height(1.dp)
         .background(ClawTheme.colors.border.copy(alpha = 0.6f)),
@@ -244,6 +248,7 @@ internal fun MiuixSwitchRow(
   subtitle: String? = null,
   icon: ImageVector? = null,
   tone: MiuixTone = MiuixTone.Neutral,
+  reserveIconSpace: Boolean = true,
   enabled: Boolean = true,
 ) {
   MiuixRowContent(
@@ -252,6 +257,7 @@ internal fun MiuixSwitchRow(
     subtitle = subtitle,
     icon = icon,
     tone = tone,
+    reserveIconSpace = reserveIconSpace,
     enabled = enabled,
     onClick = if (enabled) { { onCheckedChange(!checked) } } else null,
     trailing = {
@@ -274,17 +280,23 @@ internal fun MiuixValueRow(
   value: String,
   modifier: Modifier = Modifier,
   subtitle: String? = null,
+  subtitleColor: Color? = null,
   icon: ImageVector? = null,
   tone: MiuixTone = MiuixTone.Neutral,
   loading: Boolean = false,
   reserveIconSpace: Boolean = true,
   onClick: (() -> Unit)? = null,
   showChevron: Boolean = onClick != null,
+  /** Replaces the disclosure chevron, e.g. the up/down glyph of a picker row. */
+  trailingIcon: ImageVector? = null,
+  /** Applied to the trailing cluster so a morph menu can anchor to it. */
+  trailingModifier: Modifier = Modifier,
 ) {
   MiuixRowContent(
     modifier = modifier,
     title = title,
     subtitle = subtitle,
+    subtitleColor = subtitleColor,
     icon = icon,
     tone = tone,
     reserveIconSpace = reserveIconSpace,
@@ -297,7 +309,11 @@ internal fun MiuixValueRow(
           color = ClawTheme.colors.textMuted,
         )
       } else {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(
+          modifier = trailingModifier,
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
           if (value.isNotEmpty()) {
             Text(
               text = value,
@@ -307,9 +323,9 @@ internal fun MiuixValueRow(
               overflow = TextOverflow.Ellipsis,
             )
           }
-          if (showChevron) {
+          if (showChevron || trailingIcon != null) {
             Icon(
-              imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+              imageVector = trailingIcon ?: Icons.AutoMirrored.Filled.KeyboardArrowRight,
               contentDescription = null,
               tint = ClawTheme.colors.textSubtle,
               modifier = Modifier.size(16.dp),
@@ -404,6 +420,7 @@ private fun MiuixRowContent(
   title: String,
   modifier: Modifier = Modifier,
   subtitle: String? = null,
+  subtitleColor: Color? = null,
   icon: ImageVector? = null,
   tone: MiuixTone = MiuixTone.Neutral,
   enabled: Boolean = true,
@@ -447,7 +464,7 @@ private fun MiuixRowContent(
         Text(
           text = subtitle,
           style = ClawTheme.type.caption,
-          color = ClawTheme.colors.textMuted,
+          color = subtitleColor ?: ClawTheme.colors.textMuted,
           maxLines = 3,
           overflow = TextOverflow.Ellipsis,
         )

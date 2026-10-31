@@ -171,6 +171,15 @@ class ChatScreenTest {
       ChatComposerPrimaryAction.StartTalk,
       resolveChatComposerPrimaryAction(talkActive = false, runActive = false, hasContent = false),
     )
+    assertEquals(
+      ChatComposerPrimaryAction.Send,
+      resolveChatComposerPrimaryAction(
+        talkActive = false,
+        runActive = false,
+        hasContent = false,
+        liveTalkVisible = false,
+      ),
+    )
   }
 
   @Test

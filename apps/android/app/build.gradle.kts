@@ -382,6 +382,7 @@ dependencies {
   implementation(libs.media3.ui)
   implementation(libs.bcprov)
   implementation(libs.coil.compose)
+  implementation(libs.coil.network.okhttp)
   implementation(libs.coil.svg)
   implementation(libs.commonmark)
   implementation(libs.commonmark.ext.autolink)

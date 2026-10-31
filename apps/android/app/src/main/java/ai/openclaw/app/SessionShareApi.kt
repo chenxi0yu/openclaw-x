@@ -252,6 +252,7 @@ internal fun sessionShareFailureText(
   return when (failure.code) {
     401 -> nativeString("网关鉴权未通过，请重新连接网关后再试")
     403 -> nativeString("当前网关账号没有分享管理权限")
+    404 -> nativeString("需要网关安装分享插件才可使用网页分享")
     413 -> nativeString("选中的内容太多，请减少勾选后再分享")
     422 -> nativeString("部分勾选的消息已不存在，请重新勾选后再分享")
     429 -> {

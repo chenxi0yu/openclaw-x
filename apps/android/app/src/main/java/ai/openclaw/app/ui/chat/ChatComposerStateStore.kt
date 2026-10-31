@@ -1,6 +1,7 @@
 package ai.openclaw.app.ui.chat
 
 import ai.openclaw.app.chat.ChatComposerOwner
+import androidx.compose.runtime.mutableStateMapOf
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,6 +25,7 @@ internal data class ChatComposerSendRequest(
   val inputSnapshot: String,
   val message: String,
   val attachments: List<PendingAttachment>,
+  val quote: ChatQuoteDraft? = null,
 )
 
 internal data class ChatComposerSendStart(
@@ -54,6 +56,26 @@ internal class ChatComposerStateStore(
       onSnapshotChanged = onDraftSnapshotChanged,
     )
   val attachments = attachmentStore.attachments
+
+  /** Per-owner pending quote. Not persisted: losing it on process death loses only the capsule. */
+  val quoteDrafts = mutableStateMapOf<ChatComposerOwner, ChatQuoteDraft>()
+
+  fun setQuote(
+    owner: ChatComposerOwner,
+    quote: ChatQuoteDraft?,
+  ) {
+    synchronized(lock) {
+      if (quote == null || quote.body.isEmpty()) {
+        quoteDrafts.remove(owner)
+      } else {
+        quoteDrafts[owner] = quote
+      }
+    }
+  }
+
+  fun clearQuote(owner: ChatComposerOwner) {
+    synchronized(lock) { quoteDrafts.remove(owner) }
+  }
 
   private val attachmentNoticesState =
     MutableStateFlow<Map<ChatComposerOwner, ChatComposerAttachmentNotice>>(emptyMap())
@@ -110,7 +132,8 @@ internal class ChatComposerStateStore(
       }
       val inputSnapshot = textDrafts[owner]
       val attachments = attachmentStore.get(owner)
-      if (inputSnapshot.isBlank() && attachments.isEmpty()) {
+      val quote = quoteDrafts[owner]
+      if (inputSnapshot.isBlank() && attachments.isEmpty() && quote == null) {
         return@synchronized ChatComposerSendStart(ChatComposerSendStartResult.Unavailable)
       }
       if (inputSnapshot.length > CHAT_COMPOSER_MAX_SEND_CHARS) {
@@ -124,7 +147,15 @@ internal class ChatComposerStateStore(
         sendStatesState.value + (owner to ChatComposerSendState(activeOperationIds = setOf(commandId)))
       ChatComposerSendStart(
         result = ChatComposerSendStartResult.Started,
-        request = ChatComposerSendRequest(commandId, owner, inputSnapshot, inputSnapshot.trim(), attachments),
+        request =
+          ChatComposerSendRequest(
+            commandId = commandId,
+            owner = owner,
+            inputSnapshot = inputSnapshot,
+            message = composeChatOutgoingMessage(quote, inputSnapshot),
+            attachments = attachments,
+            quote = quote,
+          ),
       )
     }
 
@@ -149,6 +180,10 @@ internal class ChatComposerStateStore(
           resolvedOwner,
           request.attachments.mapTo(linkedSetOf()) { attachment -> attachment.id },
         )
+        // Keep a quote the user attached while this send was in flight.
+        if (request.quote != null && quoteDrafts[resolvedOwner] == request.quote) {
+          quoteDrafts.remove(resolvedOwner)
+        }
       }
       finishActiveSendLocked(
         owners = setOf(request.owner, resolvedOwner),
@@ -283,6 +318,16 @@ internal class ChatComposerStateStore(
       }
 
       val textSources = textDrafts.migrateMatching(to = to, mainSessionKey = mainSessionKey)
+      val quoteSources =
+        quoteDrafts.keys.filterTo(linkedSetOf()) { source ->
+          shouldMigrateComposerDraft(source, to, mainSessionKey)
+        }
+      if (quoteSources.isNotEmpty()) {
+        if (quoteDrafts[to] == null) {
+          quoteSources.firstNotNullOfOrNull(quoteDrafts::get)?.let { quote -> quoteDrafts[to] = quote }
+        }
+        quoteSources.forEach(quoteDrafts::remove)
+      }
       val attachmentMigration = attachmentStore.migrateMatching(to = to, mainSessionKey = mainSessionKey)
       val sendSources = sendStatesState.value.keys.filterTo(linkedSetOf()) { source -> shouldMigrateComposerDraft(source, to, mainSessionKey) }
       val noticeSources =
@@ -327,6 +372,7 @@ internal class ChatComposerStateStore(
     synchronized(lock) {
       removeMediaOwnersLocked(matches)
       textDrafts.removeOwners(matches)
+      quoteDrafts.keys.toList().filter(matches).forEach(quoteDrafts::remove)
       val currentSendStates = sendStatesState.value
       var nextSendStates = currentSendStates.filterKeys { !matches(it) }
       val retainedEntry =

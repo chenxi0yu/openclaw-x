@@ -127,6 +127,18 @@ internal val LucideTextIcon: ImageVector by lazy {
   )
 }
 
+/** Lucide `panel-bottom`: a rounded panel with the composer's bar along its base. */
+internal val LucideComposerBarIcon: ImageVector by lazy {
+  lucideIcon(
+    name = "LucideComposerBar",
+    paths =
+      listOf(
+        "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z",
+        "M3 15h18",
+      ),
+  )
+}
+
 /**
  * WeChat brand mark (filled, per the simple-icons glyph). Unlike the stroke
  * Lucide set above this is a filled path — the two-bubble logo only reads

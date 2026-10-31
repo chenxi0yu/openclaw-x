@@ -33,6 +33,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -40,6 +44,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -61,6 +66,9 @@ class MainActivity : AppCompatActivity() {
     super.onCreate(savedInstanceState)
     pendingIntentRouter.setInitialIntent(intent)
     WindowCompat.setDecorFitsSystemWindows(window, false)
+    // Keep the gesture/navigation strip transparent instead of letting the
+    // system paint its contrast scrim over the chat background.
+    window.isNavigationBarContrastEnforced = false
     permissionRequester.attach(this)
     if (BuildConfig.DEBUG) {
       screenshotScene = parseAndroidScreenshotModeIntent(intent)
@@ -82,7 +90,18 @@ class MainActivity : AppCompatActivity() {
       }
 
       val currentViewModel = activeViewModel
-      Box(modifier = Modifier.fillMaxSize()) {
+      // "新对话" startups hold the mask until the local draft is applied; without
+      // this the shell paints the old conversation for a beat and then jumps.
+      // Seed from the flow's current value when the ViewModel arrives so the mask
+      // never drops for a frame between composition and the first emission.
+      val startupPendingFlow = currentViewModel?.startupNewChatPending
+      var startupNewChatPending by remember(startupPendingFlow) {
+        mutableStateOf(startupPendingFlow?.value == true)
+      }
+      LaunchedEffect(startupPendingFlow) {
+        startupPendingFlow?.collect { startupNewChatPending = it }
+      }
+      Box(modifier = Modifier.fillMaxSize().dismissTextToolbarOnPress()) {
         if (currentViewModel != null) {
           val appearanceThemeMode by currentViewModel.appearanceThemeMode.collectAsState()
           val appearanceTextScale by currentViewModel.appearanceTextScale.collectAsState()
@@ -97,7 +116,7 @@ class MainActivity : AppCompatActivity() {
         // The mask layers above the content instead of swapping with it: it fades out over the
         // canvas-colored shell, so warm-up ends in one continuous reveal and nothing the shell
         // draws (embedded WebViews included) gets pushed into an alpha group.
-        StartupMask(visible = currentViewModel == null)
+        StartupMask(visible = currentViewModel == null || startupNewChatPending)
       }
     }
   }
@@ -383,6 +402,31 @@ internal class MainActivityRuntimeUiStarter {
 
 /** Long enough to read as a hand-off, short enough that warm-up never feels like a wait. */
 private const val STARTUP_MASK_FADE_MS = 600
+
+/**
+ * Closes the platform text-selection toolbar on the next press anywhere in the app.
+ *
+ * The toolbar is an action-mode popup owned by the text field, and it only goes away through
+ * the field's own dismissal — which never runs for presses that land on the transcript, a
+ * header, or the drawer, so a long-press menu on the composer stayed on screen until the
+ * selection changed. Watching the Initial pass at the app root sees every press before any
+ * child handles it: it hides a stale toolbar without consuming the event, and the press that
+ * starts a new selection has not shown one yet.
+ */
+@Composable
+private fun Modifier.dismissTextToolbarOnPress(): Modifier {
+  val textToolbar = LocalTextToolbar.current
+  return remember(textToolbar) {
+    Modifier.pointerInput(textToolbar) {
+      awaitPointerEventScope {
+        while (true) {
+          val event = awaitPointerEvent(PointerEventPass.Initial)
+          if (event.type == PointerEventType.Press) textToolbar.hide()
+        }
+      }
+    }
+  }
+}
 
 /** Startup mask that fades away once the real content composes underneath it. */
 @Composable

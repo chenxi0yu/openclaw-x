@@ -9,6 +9,13 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.HazeSourceSelection
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.blur.HazeBlurStyle
+import dev.chrisbanes.haze.blur.HazeColorEffect
+import dev.chrisbanes.haze.blur.hazeBlur
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -130,6 +137,31 @@ internal object ClawMorphMenuDefaults {
  */
 internal class ClawMorphMenuState {
   val fraction: Animatable<Float, *> = Animatable(0f)
+
+  /**
+   * Uniform surface scale, driven by a caller that folds the card back while a
+   * nested panel takes over. Stays at 1 for every ordinary menu.
+   */
+  val surfaceScale: Animatable<Float, *> = Animatable(1f)
+
+  /**
+   * Draw the panel with Haze instead of the backdrop shader. The composer's
+   * card samples the transcript this way: Haze's capture of that subtree stays
+   * stable while the composer's own glass animates underneath, whereas the
+   * backdrop layer re-records it and the panel's blur churned every frame.
+   */
+  var haze: HazeState? = null
+
+  /**
+   * Critically damped growth. A size-animated glass rebuilds its blur whenever
+   * its bounds change, so the spring's final overshoot keeps mutating the
+   * backdrop for a few extra frames — visible as a flash right at the end.
+   * Menus that notice it land without overshoot instead.
+   */
+  var smoothExpansion: Boolean = false
+
+
+
 
   /**
    * Exit recoil, driven by the overlay and read by the trigger. It cannot live
@@ -383,7 +415,11 @@ internal fun ClawMorphMenuOverlay(
       launch {
         fraction.animateTo(
           1f,
-          spring(dampingRatio = 0.77f, stiffness = 220f, visibilityThreshold = 0.0001f),
+          spring(
+            dampingRatio = if (state.smoothExpansion) 1f else 0.77f,
+            stiffness = 220f,
+            visibilityThreshold = 0.0001f,
+          ),
         )
       }
       launch {
@@ -402,6 +438,7 @@ internal fun ClawMorphMenuOverlay(
       launch {
         settleBounce.animateTo(1f, spring(dampingRatio = 0.77f, stiffness = 420f))
       }
+
     } else if (hasOpened) {
       val exitEasing = CubicBezierEasing(0.0f, 0.0f, 0.0f, 1.0f)
       launch {
@@ -526,9 +563,13 @@ private fun ClawMorphMenuGlass(
   val collapsedHeight = with(density) { anchor.height.toDp() }
   val width = lerp(collapsedWidth, panelWidth, fraction)
   val height = lerp(collapsedHeight, targetHeight, fraction)
+  val anchorScaleX = 1f
+  val anchorScaleY = 1f
   // Content scales with the container so items emerge from the trigger sized
   // up, matching the glass growth instead of popping in at full size.
   val contentScale = (width / panelWidth).coerceAtLeast(0f)
+  val glassEdgeRadius = ClawMorphMenuDefaults.CornerRadius
+  val glassShape = RoundedCornerShape(glassEdgeRadius)
   // Clear at both ends, blurred mid-morph: reinforces the glass re-forming.
   val contentBlur = 6.dp * (1f - abs(2f * fraction - 1f)).coerceIn(0f, 1f)
   // Material appears early and disappears late (saturates at f=0.2).
@@ -554,6 +595,50 @@ private fun ClawMorphMenuGlass(
         lens(8.dp.toPx(), 24.dp.toPx())
       }
     }
+  // drawBackdrop keys its RenderEffect on the identity of every lambda it
+  // receives. Inline ones are recreated by each recomposition (the panel
+  // recomposes every frame while the trigger springs run), which rebuilt the
+  // blur every frame and read as heavy flicker. All of them are remembered.
+  val shapeLambda: () -> androidx.compose.ui.graphics.Shape = remember(shape) { { shape } }
+  val surfaceTintAlpha =
+    if (state.tintAlpha >= 0f) {
+      state.tintAlpha
+    } else if (dark) {
+      ClawGlassMenuDefaults.TintAlphaDark
+    } else {
+      ClawGlassMenuDefaults.TintAlphaLight
+    }
+  val surfaceFill = if (dark) colors.surfaceRaised else androidx.compose.ui.graphics.Color.White
+  val drawSurface: androidx.compose.ui.graphics.drawscope.DrawScope.() -> Unit =
+    remember(surfaceFill, surfaceTintAlpha) {
+      { drawRect(surfaceFill.copy(alpha = surfaceTintAlpha)) }
+    }
+  val canvasColor = colors.canvas
+  val hazeStyle =
+    remember(dark, surfaceFill, surfaceTintAlpha, canvasColor) {
+      HazeBlurStyle {
+        blurEnabled(true)
+        // Softer than the backdrop menus: the composer card should read as a
+        // thin sheet over the chat, not a frosted slab.
+        blurRadius(20.dp)
+        noiseFactor(if (dark) 0.04f else 0.03f)
+        backgroundColor(canvasColor)
+        colorEffects(
+          listOf(
+            HazeColorEffect.tint(surfaceFill.copy(alpha = surfaceTintAlpha)),
+            // Haze's blur washes toward grey because dark text smears into the
+            // sample; a little additive white lifts it back without making the
+            // surface more opaque.
+            HazeColorEffect.tint(
+              androidx.compose.ui.graphics.Color.White.copy(alpha = if (dark) 0.03f else 0.07f),
+              androidx.compose.ui.graphics.BlendMode.Plus,
+            ),
+          ),
+        )
+        fallbackColorEffect(HazeColorEffect.tint(surfaceFill.copy(alpha = 0.92f)))
+      }
+    }
+  val hazeSource = state.haze
 
   // Press/drag lives on the panel only while it is open. Collapsed, the glass
   // sits exactly on the trigger capsule, which has its own press state — both
@@ -584,6 +669,11 @@ private fun ClawMorphMenuGlass(
           val bouncePx = pulse * ClawMorphMenuDefaults.BounceTravelDp.toPx()
           translationX = sx * (panelW * k - bouncePx)
           translationY = sy * (targetH * k - bouncePx)
+          // Nested-menu recession. The glass, its content and its press layer
+          // shrink together around the panel centre; ordinary menus keep 1f.
+          val panelScale = state.surfaceScale.value
+          scaleX = panelScale * anchorScaleX
+          scaleY = panelScale * anchorScaleY
         }
         // Its own layer, nested inside the migration layer: the two transforms
         // compose, and the press squish scales the clipped silhouette with it.
@@ -597,7 +687,7 @@ private fun ClawMorphMenuGlass(
           },
         )
         .size(width, height)
-        .clip(shape)
+        .clip(glassShape)
         .then(
           if (state.expanded) {
             pressDrag.modifier.then(pressDrag.gestureModifier)
@@ -611,39 +701,34 @@ private fun ClawMorphMenuGlass(
         Modifier
           .matchParentSize()
           .graphicsLayer { alpha = materialVisible }
-          .drawBackdrop(
-            backdrop = backdrop,
-            shape = { shape },
-            effects = glassEffects,
-            // The same material the other glass menus use: blurred backdrop +
-            // a 0.26/0.30 tint. A chat transcript is white paper with black
-            // ink, so a heavy surface fill (this started at 0.78, copied from
-            // Nexio's colourful course cards) flattens the sample into a plain
-            // white card and the panel reads as opaque paper instead of glass.
-            // Blur carries the legibility; the tint only removes the last of
-            // the structure.
-            onDrawSurface = {
-              // A menu that lands on another glass surface raises this via
-              // ClawMorphMenuState.open so the surface below does not read
-              // through as a second, unsynced layer.
-              val alpha =
-                if (state.tintAlpha >= 0f) {
-                  state.tintAlpha
-                } else if (dark) {
-                  ClawGlassMenuDefaults.TintAlphaDark
-                } else {
-                  ClawGlassMenuDefaults.TintAlphaLight
-                }
-              drawRect(
-                (if (dark) colors.surfaceRaised else androidx.compose.ui.graphics.Color.White)
-                  .copy(alpha = alpha),
+          .then(
+            if (hazeSource != null) {
+              Modifier
+                .background(surfaceFill.copy(alpha = surfaceTintAlpha))
+                .hazeBlur(
+                  input = HazeInput.Sources(hazeSource, selection = HazeSourceSelection.All),
+                  style = hazeStyle,
+                )
+            } else {
+              // The same material the other glass menus use: blurred backdrop +
+              // a 0.26/0.30 tint. A chat transcript is white paper with black
+              // ink, so a heavy surface fill (this started at 0.78, copied from
+              // Nexio's colourful course cards) flattens the sample into a plain
+              // white card and the panel reads as opaque paper instead of glass.
+              // Blur carries the legibility; the tint only removes the last of
+              // the structure.
+              Modifier.drawBackdrop(
+                backdrop = backdrop,
+                shape = shapeLambda,
+                effects = glassEffects,
+                onDrawSurface = drawSurface,
               )
             },
           )
           // Rim + inner highlight: without them a lightly tinted panel over a
-          // light canvas has no silhouette at all. After `drawBackdrop` so the
-          // strokes land on top of the glass, not under it.
-          .clawGlassEdge(cornerRadius = ClawMorphMenuDefaults.CornerRadius, dark = dark),
+          // light canvas has no silhouette at all. After the glass so the
+          // strokes land on top of it, not under it.
+          .clawGlassEdge(cornerRadius = glassEdgeRadius, dark = dark),
     )
     // Menu content: measured at full panel width so the natural height is the
     // real one, centered, then scaled to the current glass size and clipped.

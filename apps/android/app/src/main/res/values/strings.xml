@@ -1723,4 +1723,9 @@
     <string name="native_ffaed354e7fe5514" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"OpenClaw turns this phone into a clean mobile command surface for threads, voice, providers, and Gateway."</string>
     <string name="native_ffb6f5764bddb68c" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"Newest first"</string>
     <string name="native_ffcf16006c652ee3" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"Next Cycle"</string>
+    <string name="native_7d28f801df95601a" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"Follow up"</string>
+    <string name="native_eb4cdebd82bf1194" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"Quote"</string>
+    <string name="native_68c3261b08e94f12" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"Quoted earlier content"</string>
+    <string name="native_2c85efad67614491" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"Remove quote"</string>
+    <string name="native_e64a6259d78c4caa" formatted="false" tools:ignore="Typos,TypographyDashes,TypographyEllipsis">"Quoted message is not in this conversation."</string>
 </resources>

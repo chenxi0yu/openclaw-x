@@ -27,6 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -54,6 +55,12 @@ internal data class ToolActivityDetail(
   val target: String? = null,
   val detailText: String? = null,
   val output: String? = null,
+  /**
+   * Unclamped tool result. [output] is capped for the raw text fallback, but a
+   * structured renderer (the web-search card) needs the complete JSON — a
+   * truncated envelope parses as nothing and would fall back to raw text.
+   */
+  val rawOutput: String? = null,
   val isError: Boolean = false,
   val running: Boolean = false,
   val iconOverride: ImageVector? = null,
@@ -123,13 +130,15 @@ internal fun completedToolDetail(
   val target =
     toolTargetOrName(toolTargetLabel(tool.arguments, tool.name), tool.name)
       ?.take(TOOL_TARGET_MAX_CHARS)
+  val result = completedToolResultPresentation(tool).output
   return ToolActivityDetail(
     key = tool.toolCallId ?: "${tool.name}:${tool.detail.orEmpty().hashCode()}",
     title = toolTitle(if (running) toolVerbInProgress(kind) else toolVerbDone(kind), target),
     kind = kind,
     target = target,
     detailText = tool.detail?.take(TOOL_DETAIL_MAX_CHARS),
-    output = completedToolResultPresentation(tool).output?.take(TOOL_DETAIL_MAX_CHARS),
+    output = result?.take(TOOL_DETAIL_MAX_CHARS),
+    rawOutput = result,
     isError = tool.isError,
     running = running,
   )
@@ -193,10 +202,20 @@ internal fun ToolDetailSheet(
   onDismiss: () -> Unit,
 ) {
   val colors = ClawTheme.colors
+  val webSearch =
+    remember(detail.key, detail.rawOutput, detail.output, detail.detailText) {
+      if (detail.kind == CompletedToolKind.WebSearch) {
+        parseWebSearchInfo(output = detail.rawOutput ?: detail.output, arguments = detail.detailText)
+      } else {
+        null
+      }
+    }
   ModalBottomSheet(
     onDismissRequest = onDismiss,
     sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-    containerColor = colors.surface,
+    // The white result cards need a canvas-toned sheet to read as cards, like
+    // the notification shade; raw tool output keeps the plain surface sheet.
+    containerColor = if (webSearch != null) colors.canvas else colors.surface,
     contentColor = colors.text,
   ) {
     Column(
@@ -222,15 +241,19 @@ internal fun ToolDetailSheet(
           color = if (detail.isError) colors.danger else colors.text,
         )
       }
-      if (!detail.detailText.isNullOrBlank()) {
-        ToolDetailSection(label = detail.detailLabel ?: "参数", value = detail.detailText)
-      }
-      if (!detail.output.isNullOrBlank()) {
-        ToolDetailSection(label = if (detail.isError) "错误" else "输出", value = detail.output)
-      } else if (detail.isError) {
-        ToolDetailSection(label = "错误", value = "工具执行失败，没有返回输出。")
-      } else if (detail.running) {
-        ToolDetailSection(label = "状态", value = "工具正在执行中，完成后会显示输出。")
+      if (webSearch != null) {
+        WebSearchDetailContent(info = webSearch)
+      } else {
+        if (!detail.detailText.isNullOrBlank()) {
+          ToolDetailSection(label = detail.detailLabel ?: "参数", value = detail.detailText)
+        }
+        if (!detail.output.isNullOrBlank()) {
+          ToolDetailSection(label = if (detail.isError) "错误" else "输出", value = detail.output)
+        } else if (detail.isError) {
+          ToolDetailSection(label = "错误", value = "工具执行失败，没有返回输出。")
+        } else if (detail.running) {
+          ToolDetailSection(label = "状态", value = "工具正在执行中，完成后会显示输出。")
+        }
       }
       Spacer(Modifier.height(24.dp))
     }
