@@ -462,9 +462,16 @@ internal fun ClawGlassMenuItem(
   icon: ImageVector? = null,
   leading: (@Composable () -> Unit)? = null,
   trailing: String? = null,
+  // Glyph after the label: the "opens a nested panel" affordance, matching the
+  // composer's drill rows. Text `trailing` stays for value strings.
+  trailingIcon: ImageVector? = null,
   selected: Boolean = false,
   danger: Boolean = false,
   enabled: Boolean = true,
+  // Rows that open a nested panel keep the surface alive: dismissing here would
+  // collapse the primary card before the drill can grow out of this row.
+  keepOpen: Boolean = false,
+  modifier: Modifier = Modifier,
 ) {
   val colors = ClawTheme.colors
   val dismissMenu = LocalClawGlassMenuDismiss.current
@@ -490,7 +497,7 @@ internal fun ClawGlassMenuItem(
         enabled = enabled,
         role = Role.Button,
         onClick = {
-          dismissMenu()
+          if (!keepOpen) dismissMenu()
           onClick()
         },
       )
@@ -499,7 +506,7 @@ internal fun ClawGlassMenuItem(
     }
   Row(
     modifier =
-      Modifier
+      modifier
         .fillMaxWidth()
         .heightIn(min = ClawGlassMenuDefaults.ItemHeight)
         .padding(horizontal = 6.dp)
@@ -534,6 +541,14 @@ internal fun ClawGlassMenuItem(
         style = ClawTheme.type.caption,
         color = colors.textSubtle,
         maxLines = 1,
+      )
+    }
+    if (trailingIcon != null) {
+      Icon(
+        imageVector = trailingIcon,
+        contentDescription = null,
+        tint = colors.textSubtle,
+        modifier = Modifier.size(16.dp),
       )
     }
     if (selected) {

@@ -8,6 +8,8 @@ import ai.openclaw.app.chat.ChatSessionEntry
 import ai.openclaw.app.chat.SESSION_LIST_FETCH_LIMIT
 import ai.openclaw.app.chat.selectChatAgentSessionKey
 import ai.openclaw.app.gateway.GatewayEndpoint
+import ai.openclaw.app.gateway.GatewayRegistryEntry
+import ai.openclaw.app.gateway.GatewayRegistryEntryKind
 import ai.openclaw.app.gateway.GatewayRequestRejected
 import ai.openclaw.app.gateway.GatewaySession
 import android.content.Context
@@ -621,6 +623,93 @@ class NodeRuntimeAgentSelectionTest {
         withTimeout(2_000) { lookupJob.join() }
 
         assertEquals(scoutMain, runtime.chatSessionKey.value)
+      } finally {
+        closeNodeRuntimeTestFixture(runtime)
+      }
+    }
+
+  @Test
+  fun coldStartBindsPersistedAgentBeforeAnyGatewayRoundTrip() =
+    runBlocking {
+      val app = RuntimeEnvironment.getApplication()
+      val prefs =
+        SecurePrefs(
+          app,
+          app.getSharedPreferences("node-runtime-cold-start-${UUID.randomUUID()}", Context.MODE_PRIVATE),
+        )
+      val endpoint = GatewayEndpoint.manual("127.0.0.1", 18789)
+      prefs.gatewayRegistry.upsert(
+        GatewayRegistryEntry(
+          stableId = endpoint.stableId,
+          kind = GatewayRegistryEntryKind.MANUAL,
+          name = endpoint.name,
+          host = endpoint.host,
+          port = endpoint.port,
+          tls = false,
+        ),
+      )
+      prefs.gatewayRegistry.setActive(endpoint.stableId)
+      prefs.saveCachedAgentCatalog(
+        endpoint.stableId,
+        defaultAgentId = "main",
+        agents =
+          listOf(
+            GatewayAgentSummary(id = "main", name = "Main", emoji = null),
+            GatewayAgentSummary(id = "scout", name = "Scout", emoji = null),
+          ),
+      )
+      prefs.setLastChatAgentId(endpoint.stableId, "scout")
+
+      val runtime = NodeRuntime(app, prefs)
+      try {
+        // Restored before connect, so the first frame never shows the default agent.
+        assertEquals("agent:scout:main", runtime.mainSessionKey.value)
+        assertEquals("agent:scout:main", runtime.chatSessionKey.value)
+        assertEquals("scout", runtime.chatSessionOwnerAgentId.value)
+        assertEquals(
+          listOf("main", "scout"),
+          runtime.gatewayAgents.value.map { it.id },
+        )
+      } finally {
+        closeNodeRuntimeTestFixture(runtime)
+      }
+    }
+
+  @Test
+  fun coldStartBindsPersistedAgentWithoutCatalogSnapshot() =
+    runBlocking {
+      val app = RuntimeEnvironment.getApplication()
+      val prefs =
+        SecurePrefs(
+          app,
+          app.getSharedPreferences("node-runtime-cold-start-no-snapshot-${UUID.randomUUID()}", Context.MODE_PRIVATE),
+        )
+      // A unique port keeps the gateway-keyed plain prefs from colliding with the
+      // other cold-start case in this class (plain prefs are not overridable).
+      val endpoint = GatewayEndpoint.manual("127.0.0.1", 18790)
+      prefs.gatewayRegistry.upsert(
+        GatewayRegistryEntry(
+          stableId = endpoint.stableId,
+          kind = GatewayRegistryEntryKind.MANUAL,
+          name = endpoint.name,
+          host = endpoint.host,
+          port = endpoint.port,
+          tls = false,
+        ),
+      )
+      prefs.gatewayRegistry.setActive(endpoint.stableId)
+      // No agents.list snapshot on disk (upgrade from an older build, failed write);
+      // only the persisted last-agent choice survives.
+      prefs.setLastChatAgentId(endpoint.stableId, "scout")
+
+      val runtime = NodeRuntime(app, prefs)
+      try {
+        // Still restored before connect: a missing snapshot must not pin the cold
+        // start on the default agent until agents.list validates the choice.
+        assertEquals("agent:scout:main", runtime.mainSessionKey.value)
+        assertEquals("agent:scout:main", runtime.chatSessionKey.value)
+        assertEquals("scout", runtime.chatSessionOwnerAgentId.value)
+        assertEquals(emptyList<String>(), runtime.gatewayAgents.value.map { it.id })
       } finally {
         closeNodeRuntimeTestFixture(runtime)
       }

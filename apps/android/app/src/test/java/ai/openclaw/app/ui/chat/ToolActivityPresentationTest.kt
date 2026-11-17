@@ -169,6 +169,36 @@ class ToolActivityPresentationTest {
     }
   }
 
+  @Test
+  fun `gateway title replaces the command in both live and finished rows`() {
+    val args = buildJsonObject { put("command", "cd /home/node && ls -la") }
+    val live =
+      ai.openclaw.app.chat.ChatPendingToolCall(
+        toolCallId = "call-1",
+        name = "exec",
+        args = args,
+        startedAtMs = 1,
+        title = "List workspace contents",
+      )
+    assertEquals("List workspace contents", pendingToolDetail(live).title)
+
+    val finished = ChatToolActivity("call-1", "exec", "command: cd /home/node && ls -la", null, false, args, "List workspace contents")
+    assertEquals("List workspace contents", completedToolDetail(finished).title)
+
+    // No title: fall back to the verb + command.
+    assertEquals("已执行 cd /home/node && ls -la", completedToolDetail(finished.copy(title = null)).title)
+  }
+
+  @Test
+  fun `read and edit rows show the file name instead of the full path`() {
+    val path = "C:\\Users\\me\\repo\\apps\\android\\ChatScreen.kt"
+    assertEquals("ChatScreen.kt", toolTargetLabel(buildJsonObject { put("path", path) }, "read"))
+    assertEquals("ChatScreen.kt", toolTargetLabel(buildJsonObject { put("filePath", path) }, "edit"))
+    assertEquals("ChatScreen.kt", toolTargetLabel(buildJsonObject { put("path", "/home/node/a/b/ChatScreen.kt") }, "write"))
+    // Commands keep their full text.
+    assertEquals("cd /home/node && ls", toolTargetLabel(buildJsonObject { put("command", "cd /home/node && ls") }, "exec"))
+  }
+
   private fun tool(
     name: String,
     arguments: kotlinx.serialization.json.JsonObject? = null,

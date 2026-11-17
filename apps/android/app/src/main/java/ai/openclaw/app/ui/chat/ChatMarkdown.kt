@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -211,6 +212,10 @@ fun ChatMarkdown(
   bodyStyle: TextStyle = ClawTheme.type.body,
   progressBars: Boolean = false,
   contentAlignment: Alignment.Horizontal = Alignment.Start,
+  /** Non-null on the live row: keeps the block reveal wrappers mounted. */
+  blockRevealKey: String? = null,
+  /** True only for the live tail; frozen phases keep the wrappers static. */
+  blockRevealAnimate: Boolean = true,
 ) {
   val blocks = remember(text, isStreaming) { segmentChatMarkdown(text, isStreaming) }
   // Parsed nodes survive theme changes; span caches must also key on these styles.
@@ -223,28 +228,58 @@ fun ChatMarkdown(
     )
 
   Column(verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = contentAlignment) {
-    for (block in blocks) {
-      when (block) {
-        is ChatMarkdownSourceBlock.Markdown -> {
-          // CommonMark resolves backslash escapes before inline math is cut out;
-          // protecting the formula first keeps `\\` row breaks intact.
-          val documentBlocks = remember(block.source) { parseChatMarkdownBlocks(protectChatInlineMath(block.source)) }
-          RenderMarkdownBlocks(
-            blocks = documentBlocks,
-            textColor = textColor,
-            inlineStyles = inlineStyles,
-            listDepth = 0,
-            isStreaming = isStreaming,
-            progressBars = progressBars,
-          )
-        }
+    blocks.forEachIndexed { sourceIndex, block ->
+      // Wrapper keys stay mounted for every live block; only the newest one is
+      // allowed to animate. Removing a wrapper when the next block arrives
+      // would remount the block that just settled.
+      val revealPrefix = blockRevealKey?.let { "$it:$sourceIndex" }
+      val revealLastBlock = sourceIndex == blocks.lastIndex
+      key(sourceIndex) {
+        when (block) {
+          is ChatMarkdownSourceBlock.Markdown -> {
+            // CommonMark resolves backslash escapes before inline math is cut out;
+            // protecting the formula first keeps `\\` row breaks intact.
+            val documentBlocks = remember(block.source) { parseChatMarkdownBlocks(protectChatInlineMath(block.source)) }
+            RenderMarkdownBlocks(
+              blocks = documentBlocks,
+              textColor = textColor,
+              inlineStyles = inlineStyles,
+              listDepth = 0,
+              isStreaming = isStreaming,
+              progressBars = progressBars,
+              revealKeyPrefix = revealPrefix,
+              revealLastBlock = revealLastBlock,
+              revealAnimate = blockRevealAnimate,
+            )
+          }
 
-        is ChatMarkdownSourceBlock.Math -> {
-          ChatMathBlock(latex = block.latex, textColor = textColor)
-        }
+          is ChatMarkdownSourceBlock.Math -> {
+            if (revealPrefix != null) {
+              ChatTextBlockReveal(
+                revealKey = "$revealPrefix:math",
+                animate = blockRevealAnimate && revealLastBlock,
+                contentChars = block.latex.length,
+              ) {
+                ChatMathBlock(latex = block.latex, textColor = textColor)
+              }
+            } else {
+              ChatMathBlock(latex = block.latex, textColor = textColor)
+            }
+          }
 
-        is ChatMarkdownSourceBlock.MathFallback -> {
-          ChatMathFallback(latex = block.latex)
+          is ChatMarkdownSourceBlock.MathFallback -> {
+            if (revealPrefix != null) {
+              ChatTextBlockReveal(
+                revealKey = "$revealPrefix:math-fallback",
+                animate = blockRevealAnimate && revealLastBlock,
+                contentChars = block.latex.length,
+              ) {
+                ChatMathFallback(latex = block.latex)
+              }
+            } else {
+              ChatMathFallback(latex = block.latex)
+            }
+          }
         }
       }
     }
@@ -259,36 +294,81 @@ private fun RenderMarkdownBlocks(
   listDepth: Int,
   isStreaming: Boolean,
   progressBars: Boolean,
+  revealKeyPrefix: String? = null,
+  revealLastBlock: Boolean = false,
+  revealAnimate: Boolean = true,
 ) {
-  for (block in blocks) {
-    when (block) {
-      is ChatMarkdownRenderBlock.CommonMark -> {
-        RenderCommonMarkBlock(
-          current = block.node,
-          textColor = textColor,
-          inlineStyles = inlineStyles,
-          listDepth = listDepth,
-          isStreaming = isStreaming,
-          progressBars = progressBars,
-        )
-      }
+  blocks.forEachIndexed { index, block ->
+    val content: @Composable () -> Unit = {
+      when (block) {
+        is ChatMarkdownRenderBlock.CommonMark -> {
+          RenderCommonMarkBlock(
+            current = block.node,
+            textColor = textColor,
+            inlineStyles = inlineStyles,
+            listDepth = listDepth,
+            isStreaming = isStreaming,
+            progressBars = progressBars,
+          )
+        }
 
-      is ChatMarkdownRenderBlock.LiteralHtml -> {
-        RenderLiteralHtml(block.source, textColor)
-      }
+        is ChatMarkdownRenderBlock.LiteralHtml -> {
+          RenderLiteralHtml(block.source, textColor)
+        }
 
-      is ChatMarkdownRenderBlock.Disclosure -> {
-        RenderMarkdownDisclosure(
-          disclosure = block,
-          textColor = textColor,
-          inlineStyles = inlineStyles,
-          listDepth = listDepth,
-          isStreaming = isStreaming,
-          progressBars = progressBars,
-        )
+        is ChatMarkdownRenderBlock.Disclosure -> {
+          RenderMarkdownDisclosure(
+            disclosure = block,
+            textColor = textColor,
+            inlineStyles = inlineStyles,
+            listDepth = listDepth,
+            isStreaming = isStreaming,
+            progressBars = progressBars,
+          )
+        }
       }
     }
+    val revealKey = revealKeyPrefix?.let { "$it:$index" }
+    if (revealKey != null) {
+      ChatTextBlockReveal(
+        revealKey = revealKey,
+        animate = revealAnimate && revealLastBlock && index == blocks.lastIndex,
+        contentChars = chatMarkdownRenderBlockChars(block),
+      ) { content() }
+    } else {
+      content()
+    }
   }
+}
+
+/**
+ * Entrance tiering is sized on the block's own text, not the whole answer:
+ * a paragraph fades with blur, a full table or long block only fades alpha.
+ * Node literals cover paragraphs, list items, code and table cells.
+ */
+private fun chatMarkdownRenderBlockChars(block: ChatMarkdownRenderBlock): Int =
+  when (block) {
+    is ChatMarkdownRenderBlock.CommonMark -> chatMarkdownNodeChars(block.node)
+    is ChatMarkdownRenderBlock.LiteralHtml -> block.source.length
+    is ChatMarkdownRenderBlock.Disclosure -> block.blocks.sumOf(::chatMarkdownRenderBlockChars)
+  }
+
+private fun chatMarkdownNodeChars(node: Node): Int {
+  var total =
+    when (node) {
+      is MarkdownTextNode -> node.literal.orEmpty().length
+      is Code -> node.literal.orEmpty().length
+      is HtmlBlock -> node.literal.orEmpty().length
+      is FencedCodeBlock -> node.literal.orEmpty().length
+      is IndentedCodeBlock -> node.literal.orEmpty().length
+      else -> 0
+    }
+  var child = node.firstChild
+  while (child != null) {
+    total += chatMarkdownNodeChars(child)
+    child = child.next
+  }
+  return total
 }
 
 @Composable
@@ -591,7 +671,9 @@ private fun RenderChatInlineText(
   val styled = remember(text, fallbackFamily) { text.withScriptGlyphFallback(fallbackFamily) }
   val segments =
     remember(styled.text) {
-      if (containsInlineMath(styled.text)) splitInlineLatex(styled.text) else emptyList()
+      // Bare TeX (a formula the model never wrapped in `$`) is recovered inside
+      // splitInlineLatex, so this cannot be gated on a delimiter check.
+      splitInlineLatex(styled.text)
     }
   val mathSegments = segments.filterIsInstance<InlineLatexSegment.Math>()
   val hit = rememberChatTextHitTarget()

@@ -10,6 +10,7 @@ import ai.openclaw.app.chat.ChatCommandEntry
 import ai.openclaw.app.chat.ChatCommandOutbox
 import ai.openclaw.app.chat.ChatComposerOwner
 import ai.openclaw.app.chat.ChatController
+import ai.openclaw.app.chat.ChatLivePhaseCheckpoint
 import ai.openclaw.app.chat.ChatMessage
 import ai.openclaw.app.chat.ChatOutboxItem
 import ai.openclaw.app.chat.ChatPendingToolCall
@@ -1431,8 +1432,8 @@ class NodeRuntime private constructor(
   private val _gatewayAgents = MutableStateFlow<List<GatewayAgentSummary>>(emptyList())
   val gatewayAgents: StateFlow<List<GatewayAgentSummary>> = _gatewayAgents.asStateFlow()
 
-  // Preserve an explicit user choice across metadata refreshes. Gateway reconnects
-  // clear it so the newly connected gateway's canonical main agent wins again.
+  // Preserve an explicit user choice across metadata refreshes and transport drops;
+  // a different gateway's cached choice replaces it on connect.
   @Volatile private var selectedChatAgentId: String? = null
   private val chatSelectionSeq = AtomicLong(0)
   private val _cronStatus = MutableStateFlow(GatewayCronStatus(enabled = false, jobs = 0, nextWakeAtMs = null))
@@ -1626,8 +1627,17 @@ class NodeRuntime private constructor(
         _devicePairingCapabilities.value =
           selectGatewayDevicePairingCapabilities(hello.methods.orEmpty(), operatorScopes)
         _gatewayAccentArgb.value = null
-        val mainSessionKey =
-          prepareMainSessionKey(resolveAgentIdFromMainSessionKey(hello.mainSessionKey))
+        // Bind the session the user actually picked before the first history read. The
+        // gateway's hello key almost always names the built-in default ("agent:main:main"),
+        // so it must only be a fallback: otherwise every connect rebinds the default agent
+        // and the UI visibly jumps to the persisted one afterwards.
+        val selectable = _gatewayAgents.value.selectableAgents()
+        val preferredAgentId =
+          selectedChatAgentId?.takeIf { id -> selectable.any { it.id == id } }
+            ?: prefs.getLastChatAgentId(chatCacheGatewayId())
+              ?.takeIf { id -> selectable.any { it.id == id } }
+            ?: resolveAgentIdFromMainSessionKey(hello.mainSessionKey)
+        val mainSessionKey = prepareMainSessionKey(preferredAgentId)
         // Create/adopt before history refresh; this keeps the first connected read on the
         // device-owned session without changing the shipped key or its existing transcript.
         chat.onGatewayConnected(mainSessionBinding(mainSessionKey))
@@ -1906,7 +1916,9 @@ class NodeRuntime private constructor(
     // Offline edits retain their profile or device-local policy; the expired
     // physical lease still prevents requests and response publication.
     appearancePreferenceRefreshGuard.invalidate()
-    _gatewayAgents.value = emptyList()
+    // The agent catalog and the user's agent choice outlive a transport drop. They are
+    // replaced (not cleared) when a different gateway connects, so reconnecting never
+    // blanks the picker or restarts avatar decoding.
     modelCatalogRefreshGuard.invalidate()
     _modelCatalog.value = emptyList()
     providerModelCatalogRefreshGuard.invalidate()
@@ -1936,7 +1948,6 @@ class NodeRuntime private constructor(
     }
     skillsSummary.reset()
     synchronized(gatewayDataScopeLock) {
-      selectedChatAgentId = null
       chatSelectionSeq.incrementAndGet()
       sessionCatalogRefreshSeq.incrementAndGet()
       sessionCatalogContinueSeq.incrementAndGet()
@@ -2180,8 +2191,6 @@ class NodeRuntime private constructor(
           gatewayAdvertisesCapability = { _ -> true },
         )
       }
-    }.also {
-      it.applyMainSessionKey(_mainSessionKey.value)
     }
 
   private val agentRunLiveUpdateNotifier by lazy { AgentRunLiveUpdateNotifier(appContext) }
@@ -2190,6 +2199,10 @@ class NodeRuntime private constructor(
     get() = chat.runActivityPhase
 
   init {
+    hydrateAgentCatalogFromCache(prefs.gatewayRegistry.activeStableId.value)
+    // Bind only after the cache restore so the very first frame opens the agent the user
+    // picked last time; binding at construction used to start on the default agent.
+    chat.applyMainSessionKey(_mainSessionKey.value)
     if (mode == NodeRuntimeMode.Live) {
       scope.launch { collectAgentRunActivityPhase() }
     }
@@ -2242,6 +2255,56 @@ class NodeRuntime private constructor(
   private fun chatCacheGatewayId(): String? {
     connectedEndpoint?.stableId?.let { return it }
     return prefs.gatewayRegistry.activeStableId.value
+  }
+
+  /**
+   * Restores the last agents.list snapshot for a gateway so the picker, session owner and
+   * avatars render immediately on reconnect/cold start instead of after the round trip.
+   */
+  private fun hydrateAgentCatalogFromCache(
+    stableId: String?,
+    clearWhenMissing: Boolean = false,
+  ) {
+    val gatewayId = stableId?.trim()?.takeIf(String::isNotEmpty) ?: return
+    val cached = prefs.loadCachedAgentCatalog(gatewayId)
+    val agents = cached?.agents?.takeIf { it.isNotEmpty() }
+    if (agents == null) {
+      if (clearWhenMissing) {
+        _gatewayAgents.value = emptyList()
+        selectedChatAgentId = null
+      }
+      // A missing snapshot (fresh install over an older build, failed write) must not
+      // pin the cold start on the default agent: restore the persisted choice now and
+      // let the next agents.list validate it.
+      restoreLastChatAgentSelection(gatewayId, selectableIds = null)
+      return
+    }
+    _gatewayAgents.value = agents
+    cached.defaultAgentId?.let { updateGatewayDefaultAgentId(it) }
+    restoreLastChatAgentSelection(
+      gatewayId,
+      selectableIds = agents.selectableAgents().map(GatewayAgentSummary::id).toSet(),
+    )
+  }
+
+  /**
+   * Restores the agent the user picked last time so the first frame opens on it instead
+   * of the default. [selectableIds] validates the choice against a catalog snapshot when
+   * one exists; null (no snapshot) restores unvalidated, and the connected agents.list
+   * falls back through resolveAgentIdFromMainSessionKey when the agent has since been
+   * removed.
+   */
+  private fun restoreLastChatAgentSelection(
+    gatewayId: String,
+    selectableIds: Set<String>?,
+  ) {
+    val persisted = prefs.getLastChatAgentId(gatewayId) ?: return
+    if (selectableIds != null && persisted !in selectableIds) return
+    if (selectedChatAgentId == persisted) return
+    selectedChatAgentId = persisted
+    // Move the node-owned key with the restored choice; otherwise the first history
+    // read targets the default agent and only refreshAgents() switches back.
+    updateMainSessionKey(resolveNodeMainSessionKey(persisted))
   }
 
   private fun chatCacheScope(): ChatCacheScope? =
@@ -3168,6 +3231,7 @@ class NodeRuntime private constructor(
   val chatPendingSessionSettingsKeys: StateFlow<Set<String>> = chat.pendingSessionSettingsKeys
   val chatStreamingAssistantText: StateFlow<String?> = chat.streamingAssistantText
   val chatStreamingThinkingText: StateFlow<String?> = chat.streamingThinkingText
+  val chatLivePhaseCheckpoints: StateFlow<List<ChatLivePhaseCheckpoint>> = chat.livePhaseCheckpoints
   val chatPendingToolCalls: StateFlow<List<ChatPendingToolCall>> = chat.pendingToolCalls
   val chatSubagentActivities: StateFlow<Map<String, ai.openclaw.app.chat.ChatSubagentActivity>> = chat.subagentActivities
   val chatQuestions: StateFlow<List<ChatQuestionPrompt>> = chat.questions
@@ -3673,7 +3737,12 @@ class NodeRuntime private constructor(
   ): Boolean =
     gatewaySwitchMutex.withLock {
       try {
+        val previousStableId = connectedEndpoint?.stableId
         if (!drainGatewayConnectionsForConnect(endpoint, intent)) return@withLock false
+        hydrateAgentCatalogFromCache(
+          stableId = endpoint.stableId,
+          clearWhenMissing = previousStableId != null && previousStableId != endpoint.stableId,
+        )
         if (!prepare()) return@withLock false
         synchronized(gatewayLifecycleIntentLock) {
           if (!intent()) return@withLock false
@@ -5831,6 +5900,11 @@ class NodeRuntime private constructor(
     chat.dissolveSessionGroup(group)
   }
 
+  /** Registers a still-empty group on the gateway so it is shared, not device-local. */
+  suspend fun registerChatSessionGroup(group: String) {
+    chat.registerSessionGroup(group)
+  }
+
   internal suspend fun deleteChatSession(
     key: String,
     ownerAgentId: String?,
@@ -7143,6 +7217,7 @@ class NodeRuntime private constructor(
       val defaultAgentId = root["defaultId"].asStringOrNull()?.trim().orEmpty()
       val mainKey = normalizeMainKey(root["mainKey"].asStringOrNull())
       val agents = parseGatewayAgentSummaries(root)
+      prefs.saveCachedAgentCatalog(gatewayScope.stableId, defaultAgentId, agents)
 
       publishGatewayData(gatewayScope) {
         updateGatewayDefaultAgentId(defaultAgentId)

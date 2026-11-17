@@ -176,6 +176,9 @@ internal class SafeRemoteImageStore(
         }
     }
 
+  /** Synchronous cache probe so callers can paint a known image on the first frame. */
+  fun peek(url: String): RemoteImageResult? = cache.get(url)
+
   suspend fun get(url: String): RemoteImageResult {
     cache.get(url)?.let { return it }
     val result = fetcher(url)

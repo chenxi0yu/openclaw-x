@@ -1,5 +1,6 @@
 package ai.openclaw.app.ui.chat
 
+import ai.openclaw.app.chat.ChatLivePhaseCheckpoint
 import ai.openclaw.app.chat.ChatMessage
 import ai.openclaw.app.chat.ChatMessageContent
 import ai.openclaw.app.chat.ChatOutboxItem
@@ -11,6 +12,8 @@ import ai.openclaw.app.chat.ChatToolActivity
 import ai.openclaw.app.chat.OUTBOX_OWNER_CHANGED_ERROR
 import ai.openclaw.app.i18n.nativeString
 import ai.openclaw.app.resolveAgentIdFromMainSessionKey
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 /**
  * How long a live tool row may trail the newest transcript row before it is
@@ -45,10 +48,16 @@ internal sealed class ChatTimelineItem {  data class Message(
 
   data class StreamingAssistant(
     val text: String,
+    /** Distinguishes the live phase segments that share one run. */
+    val key: String = "stream",
+    /** True only for the segment still receiving text; frozen phases are static. */
+    val liveTail: Boolean = true,
   ) : ChatTimelineItem()
 
   data class PendingTools(
     val toolCalls: List<ChatPendingToolCall>,
+    /** Distinguishes one live phase's tool row from the others. */
+    val key: String = "tools",
   ) : ChatTimelineItem()
 
   data class CompletedTools(
@@ -89,6 +98,12 @@ internal sealed class ChatTimelineItem {  data class Message(
     val label: String,
     val metric: String? = null,
     val secondary: String? = null,
+  ) : ChatTimelineItem()
+
+  data class SkillLearnedNotice(
+    val key: String,
+    val skillName: String,
+    val proposalId: String?,
   ) : ChatTimelineItem()
 
   /**
@@ -132,27 +147,12 @@ private fun transcriptToolCallIds(messages: List<ChatMessage>): Set<String> {
   return ids
 }
 
-/**
- * True once the transcript already persists this reasoning text, i.e. the live
- * buffer is no longer the only place it exists. Prefix matching covers the
- * normal case where the persisted copy is the same string, and the trailing
- * whitespace that arrives with streaming chunks.
- */
-private fun transcriptHasThinking(
-  messages: List<ChatMessage>,
-  live: String,
-): Boolean {
-  val needle = live.trim()
-  if (needle.isEmpty()) return false
-  messages.forEach { message ->
-    message.content.forEach { part ->
-      if (part.type != "thinking") return@forEach
-      val persisted = part.text?.trim().orEmpty()
-      if (persisted.isEmpty()) return@forEach
-      if (persisted.startsWith(needle) || needle.startsWith(persisted)) return true
-    }
-  }
-  return false
+/** Prefix overlap used to hide a persisted copy while its live row is mounted. */
+private fun thinkingTextsOverlap(left: String, right: String): Boolean {
+  val a = left.trim()
+  val b = right.trim()
+  if (a.isEmpty() || b.isEmpty()) return false
+  return a.startsWith(b) || b.startsWith(a)
 }
 
 internal data class ChatTimeline(
@@ -170,6 +170,9 @@ internal fun buildChatTimeline(
   pendingToolCalls: List<ChatPendingToolCall>,
   streamingAssistantText: String?,
   streamingThinkingText: String? = null,
+  livePhaseCheckpoints: List<ChatLivePhaseCheckpoint> = emptyList(),
+  /** A whole user turn is still awaiting its answer, including subagent gaps. */
+  turnWorking: Boolean = false,
   subagentActivities: Map<String, ChatSubagentActivity> = emptyMap(),
   outboxItems: List<ChatOutboxItem> = emptyList(),
   recoveryOutboxItems: List<ChatOutboxItem> = emptyList(),
@@ -181,10 +184,10 @@ internal fun buildChatTimeline(
   val stream = streamingAssistantText?.takeIf { it.isNotBlank() }
   val thinking = streamingThinkingText?.trim()?.takeIf { it.isNotEmpty() }
   // The transcript is written as soon as a call starts, so it usually already
-  // holds a row for a tool that is still running. The live item stream is
-  // therefore only used to say which of those rows are still in flight: the
-  // transcript row stays the single source of the row itself, and a separate
-  // pending row would just double it.
+  // holds a row for a tool that is still running. While ordered live phases are
+  // active the phase block renders the current turn's tool rows (interleaved
+  // with reasoning) and the transcript hides those same rows below; the settled
+  // filter here only feeds the legacy stack, orphan rows and liveness checks.
   val settledToolCallIds = transcriptToolCallIds(messages)
   // A running row whose start event never got its matching end would otherwise
   // stay on screen forever. The transcript already carries these rows, so a live
@@ -205,15 +208,95 @@ internal fun buildChatTimeline(
     }
   val runningIds = livePendingToolCalls.filterNot { it.done }.mapTo(HashSet()) { it.toolCallId }
   val liveToolCalls = livePendingToolCalls.filterNot { it.toolCallId in settledToolCallIds }
-  // Same overlap for reasoning: the gateway persists a reasoning-only row the
-  // moment the reasoning stream starts, so the transcript already shows it as
-  // "思考完成" while it is still being written. Rendering the live buffer as
-  // well put the identical reasoning on screen twice — once as the persisted
-  // row and once as the streaming one. The live row is only for the window
-  // before the transcript catches up.
-  val liveThinking =
-    thinking?.takeIf { live -> !transcriptHasThinking(messages, live) }
   val visibleSubagents = visibleSubagentActivities(subagentActivities.values)
+  // Gateways that only emit the projected text (or runs without a tool) keep
+  // the legacy single live stack; ordered phases need at least one checkpoint.
+  val hasLivePhases = livePhaseCheckpoints.isNotEmpty()
+  val liveThinking = thinking
+  val livePhaseItems =
+    if (hasLivePhases) {
+      buildLivePhaseItems(
+        stream = stream,
+        thinking = thinking,
+        // Pass the full pending list (incl. calls already persisted) so the phase
+        // block keeps its tool anchors and renders thinking -> tool interleaved.
+        // The transcript hides those same rows below to avoid doubling.
+        liveToolCalls = livePendingToolCalls,
+        checkpoints = livePhaseCheckpoints,
+        pendingRunCount = pendingRunCount,
+        turnWorking = turnWorking,
+      )
+    } else {
+      emptyList()
+    }
+  val liveTurnActive =
+    pendingRunCount > 0 || turnWorking || stream != null || thinking != null || liveToolCalls.isNotEmpty()
+  val phaseToolIds =
+    livePhaseItems
+      .asSequence()
+      .filterIsInstance<ChatTimelineItem.PendingTools>()
+      .flatMap { it.toolCalls.asSequence() }
+      .mapTo(HashSet()) { it.toolCallId }
+  // While the run is live the live reasoning row is canonical. Hide a persisted
+  // copy from the same turn instead of hiding the live row: the old direction
+  // made the thinking jump from the live tail into the transcript mid-stream.
+  val liveThinkingTexts =
+    buildList {
+        if (hasLivePhases) {
+          livePhaseItems.filterIsInstance<ChatTimelineItem.Thinking>().forEach { add(it.text) }
+        }
+        liveThinking?.let(::add)
+      }
+      .map(String::trim)
+      .filter(String::isNotEmpty)
+      .distinct()
+  val transcriptItems = buildTranscriptTimeline(messages).asReversed()
+  val newestUserIndex =
+    transcriptItems.indexOfFirst { item ->
+      (item as? ChatTimelineItem.Message)?.message?.role?.trim()?.equals("user", ignoreCase = true) == true
+    }
+  val visibleTranscriptItems =
+    if (liveTurnActive && (liveThinkingTexts.isNotEmpty() || phaseToolIds.isNotEmpty())) {
+      if (newestUserIndex < 0) {
+        transcriptItems
+      } else {
+        transcriptItems.mapIndexedNotNull { index, item ->
+          val inCurrentTurn = index < newestUserIndex
+          when {
+            inCurrentTurn && item is ChatTimelineItem.Thinking ->
+              item.takeIf { persisted ->
+                liveThinkingTexts.none { live -> thinkingTextsOverlap(live, persisted.text) }
+              }
+            // The live phase block owns these tool rows while the run is live;
+            // hide the persisted copy here or the turn renders as two stacked
+            // blocks (all tools above all thinking) instead of interleaved.
+            inCurrentTurn && item is ChatTimelineItem.CompletedTools && phaseToolIds.isNotEmpty() -> {
+              val remaining = item.tools.filterNot { it.toolCallId in phaseToolIds }
+              if (remaining.isEmpty()) null else item.copy(tools = remaining)
+            }
+            else -> item
+          }
+        }
+      }
+    } else {
+      transcriptItems
+    }
+  // A history tool row can land before its agent start event. Only the current
+  // turn may still be in flight; older rows always have their result merged, so
+  // fencing here keeps historical rows from reading 正在… during a new run.
+  val currentTurnUnfinishedToolIds =
+    if (liveTurnActive && newestUserIndex > 0) {
+      transcriptItems
+        .subList(0, newestUserIndex)
+        .filterIsInstance<ChatTimelineItem.CompletedTools>()
+        .flatMap { it.tools }
+        .filter { it.result == null && !it.isError }
+        .mapNotNull { it.toolCallId }
+        .toSet()
+    } else {
+      emptySet()
+    }
+  val effectiveRunningIds = runningIds + currentTurnUnfinishedToolIds
   val items =
     // reverseLayout: index 0 renders bottom-most; queued commands are the newest user input.
     foldFinishedChainSteps(
@@ -222,26 +305,62 @@ internal fun buildChatTimeline(
           outboxItems.asReversed().forEach { item -> add(ChatTimelineItem.OutboxCommand(item)) }
           recoveryOutboxItems.asReversed().forEach { item -> add(ChatTimelineItem.RecoveryOutboxCommand(item)) }
           if (recoveryOutboxItems.isNotEmpty()) add(ChatTimelineItem.OutboxRecoveryHeader(recoveryOutboxItems.size))
-          if (stream != null) add(ChatTimelineItem.StreamingAssistant(stream))
-          if (liveToolCalls.isNotEmpty()) add(ChatTimelineItem.PendingTools(liveToolCalls))
-          if (visibleSubagents.activities.isNotEmpty()) {
-            add(
-              ChatTimelineItem.SubagentActivity(
-                activities = visibleSubagents.activities,
-                moreWorkingCount = visibleSubagents.moreWorkingCount,
-              ),
-            )
+          if (hasLivePhases) {
+            addAll(livePhaseItems)
+            if (visibleSubagents.activities.isNotEmpty()) {
+              add(
+                ChatTimelineItem.SubagentActivity(
+                  activities = visibleSubagents.activities,
+                  moreWorkingCount = visibleSubagents.moreWorkingCount,
+                ),
+              )
+            }
+            val orphanToolCalls = liveToolCalls.filterNot { it.toolCallId in phaseToolIds }
+            if (orphanToolCalls.isNotEmpty()) {
+              add(ChatTimelineItem.PendingTools(orphanToolCalls, key = "tools:orphan"))
+            }
+          } else {
+            if (stream != null) add(ChatTimelineItem.StreamingAssistant(stream))
+            if (liveToolCalls.isNotEmpty()) add(ChatTimelineItem.PendingTools(liveToolCalls))
+            if (visibleSubagents.activities.isNotEmpty()) {
+              add(
+                ChatTimelineItem.SubagentActivity(
+                  activities = visibleSubagents.activities,
+                  moreWorkingCount = visibleSubagents.moreWorkingCount,
+                ),
+              )
+            }
+            // Keep an activity row during the gap between a finished reasoning row and
+            // the first answer chunk; otherwise a buffered provider looks frozen.
+            // Use the same keys the phase builder uses so the first tool
+            // checkpoint moves this row instead of remounting it.
+            if (liveThinking != null) {
+              add(
+                ChatTimelineItem.Thinking(
+                  text = liveThinking,
+                  // Collapse the preview as soon as answer prose exists; keeping it
+                  // expanded for the whole run made the last thinking linger open
+                  // while the answer streamed (legacy stack has no phase diff).
+                  streaming = stream == null,
+                  key = "live-current",
+                ),
+              )
+            } else if ((pendingRunCount > 0 || turnWorking) && stream == null) {
+              add(ChatTimelineItem.Thinking(text = "", streaming = true, key = "live-waiting"))
+            }
           }
-          if (liveThinking != null || (pendingRunCount > 0 && thinking == null)) {
-            add(ChatTimelineItem.Thinking(text = liveThinking.orEmpty(), streaming = liveThinking != null))
-          }
-          addAll(buildTranscriptTimeline(messages).asReversed())
+          addAll(visibleTranscriptItems)
         }
         .map { item ->
-          if (item !is ChatTimelineItem.CompletedTools || runningIds.isEmpty()) return@map item
-          if (item.tools.none { it.toolCallId in runningIds }) return@map item
-          item.copy(runningIds = runningIds)
+          if (item !is ChatTimelineItem.CompletedTools) return@map item
+          if (effectiveRunningIds.isEmpty() || item.tools.none { it.toolCallId in effectiveRunningIds }) return@map item
+          item.copy(runningIds = effectiveRunningIds)
         },
+      // Older turns stay folded during the live run too; only the newest turn is
+      // exempt (handled inside). Unfolding them while the answer streamed made the
+      // whole transcript re-layout on completion, which read as the reader's
+      // viewport jumping a screenful.
+      enabled = true,
     )
   if (items.isEmpty()) {
     return ChatTimeline(
@@ -284,11 +403,118 @@ internal fun buildChatTimeline(
         visibleSubagents.moreWorkingCount,
         stream,
         thinking,
+        livePhaseCheckpoints,
+        turnWorking,
         outboxItems + recoveryOutboxItems,
         questions,
       ),
   )
 }
+
+private data class LivePhase(
+  val thinking: String,
+  val text: String,
+  val tool: ChatPendingToolCall?,
+  val index: Int,
+)
+
+/**
+ * Rebuilds the live turn as ordered phases. Tool starts snapshot both buffers,
+ * so consecutive snapshots diff back into the sequence the agent actually
+ * produced: thinking -> prose -> tool -> thinking -> answer.
+ * Items are newest-first because the transcript uses reverseLayout.
+ */
+private fun buildLivePhaseItems(
+  stream: String?,
+  thinking: String?,
+  liveToolCalls: List<ChatPendingToolCall>,
+  checkpoints: List<ChatLivePhaseCheckpoint>,
+  pendingRunCount: Int,
+  turnWorking: Boolean,
+): List<ChatTimelineItem> {
+  val fullText = stream.orEmpty()
+  val fullThinking = thinking.orEmpty()
+  val liveToolsById = liveToolCalls.associateBy { it.toolCallId }
+  val phases = mutableListOf<LivePhase>()
+  var previousText = ""
+  var previousThinking = ""
+  checkpoints.forEachIndexed { index, checkpoint ->
+    val phaseText = checkpoint.textSnapshot.removePrefixOrSelf(previousText).trimStart('\n')
+    val phaseThinking = checkpoint.thinkingSnapshot.removePrefixOrSelf(previousThinking).trimStart('\n')
+    // The caller passes the full pending list (including calls already persisted
+    // to the transcript), so a settled call keeps its tool anchor here and the
+    // phase renders thinking -> tool interleaved; the transcript hides the same
+    // row. Keep the phase even when the tool is absent from the pending list:
+    // dropping it also dropped its reasoning and prose, which is what made the
+    // first "思考完成" vanish until the next one arrived.
+    phases +=
+      LivePhase(
+        thinking = phaseThinking,
+        text = phaseText,
+        tool = liveToolsById[checkpoint.toolCallId],
+        index = index,
+      )
+    previousText = checkpoint.textSnapshot
+    previousThinking = checkpoint.thinkingSnapshot
+  }
+  val currentText = fullText.removePrefixOrSelf(previousText).trimStart('\n')
+  val currentThinking = fullThinking.removePrefixOrSelf(previousThinking).trimStart('\n')
+  phases += LivePhase(thinking = currentThinking, text = currentText, tool = null, index = checkpoints.size)
+
+  val current = phases.last()
+  val currentThinkingVisible = current.thinking.takeIf { it.isNotBlank() }
+  val items = mutableListOf<ChatTimelineItem>()
+  if (current.text.isNotBlank()) {
+    items +=
+      ChatTimelineItem.StreamingAssistant(
+        text = current.text,
+        key = if (checkpoints.isEmpty()) "stream" else "stream:live:${checkpoints.size}",
+      )
+  }
+  if (currentThinkingVisible != null) {
+    items +=
+      ChatTimelineItem.Thinking(
+        text = currentThinkingVisible,
+        streaming = pendingRunCount > 0 && current.text.isBlank(),
+        key = if (checkpoints.isEmpty()) "live-current" else "live-thinking:${checkpoints.size}",
+      )
+  } else if ((pendingRunCount > 0 || turnWorking) && current.text.isBlank()) {
+    // No reasoning streamed yet (or the model is not thinking): keep the
+    // activity indicator below the last step while the run is still alive.
+    items += ChatTimelineItem.Thinking(text = "", streaming = true, key = "live-waiting")
+  }
+  phases.dropLast(1).asReversed().forEach { phase ->
+    phase.tool?.let {
+      items += ChatTimelineItem.PendingTools(listOf(it), key = "tools:${it.toolCallId}")
+    }
+    if (phase.text.isNotBlank()) {
+      // Reuse the key the segment had while it was the live tail, so freezing
+      // it above the tool moves the row instead of remounting its text.
+      items +=
+        ChatTimelineItem.StreamingAssistant(
+          text = phase.text,
+          key = if (phase.index == 0) "stream" else "stream:live:${phase.index}",
+          liveTail = false,
+        )
+    }
+    val thinkingText = phase.thinking.takeIf { it.isNotBlank() }
+    if (thinkingText != null) {
+      // Same key the row had while it was the live thinking buffer, so a tool
+      // start freezes it in place instead of remounting the chain row.
+      items +=
+        ChatTimelineItem.Thinking(
+          text = thinkingText,
+          streaming = false,
+          key = if (phase.index == 0) "live-current" else "live-thinking:${phase.index}",
+        )
+    }
+  }
+  return items
+}
+
+/** Snapshot diff: a replacement buffer is the whole new phase, not a suffix. */
+private fun String.removePrefixOrSelf(prefix: String): String =
+  if (prefix.isNotEmpty() && startsWith(prefix)) removePrefix(prefix) else this
 
 /** Chain rows long enough to earn a fold; shorter runs stay fully visible. */
 internal const val CHAT_STEP_FOLD_MIN = 3
@@ -328,7 +554,21 @@ private fun ChatTimelineItem.isAnswerProseRow(): Boolean =
  * folded: the scan only reaches above the newest answer row, which is why a
  * turn that is still thinking keeps showing its live row.
  */
-internal fun foldFinishedChainSteps(items: List<ChatTimelineItem>): List<ChatTimelineItem> {
+internal fun foldFinishedChainSteps(
+  items: List<ChatTimelineItem>,
+  enabled: Boolean = true,
+): List<ChatTimelineItem> {
+  // The live turn keeps every step visible so the reader can follow
+  // thinking -> tool -> thinking -> answer in order instead of watching the
+  // chain collapse the moment prose starts.
+  if (!enabled) return items
+  // Keep the newest turn's process whole. Folding it the moment its answer
+  // lands hides the thinking/tool sequence the reader just watched; older
+  // turns still collapse to keep deep history compact.
+  val newestUserIndex =
+    items.indexOfFirst { item ->
+      (item as? ChatTimelineItem.Message)?.message?.role?.trim()?.equals("user", ignoreCase = true) == true
+    }
   val folded = ArrayList<ChatTimelineItem>(items.size)
   var index = 0
   while (index < items.size) {
@@ -343,7 +583,8 @@ internal fun foldFinishedChainSteps(items: List<ChatTimelineItem>): List<ChatTim
     // reverseLayout renders higher indices further up, so the answer goes in
     // first and the fold rides above it.
     folded.add(item)
-    if (end - index - 1 >= CHAT_STEP_FOLD_MIN) {
+    val newestTurn = newestUserIndex < 0 || index < newestUserIndex
+    if (!newestTurn && end - index - 1 >= CHAT_STEP_FOLD_MIN) {
       val steps = items.subList(index + 1, end).reversed()
       folded.add(
         ChatTimelineItem.CollapsedSteps(
@@ -364,6 +605,39 @@ internal fun ChatMessage.isForwardedBoundary(): Boolean =
   role.trim().equals("assistant", ignoreCase = true) &&
     provenance?.kind == "inter_session" && provenance.sourceTool == "sessions_send"
 
+private data class SkillLearnedNoticeData(
+  val skillName: String,
+  val proposalId: String?,
+)
+
+/**
+ * Skill Workshop is a Gateway-owned tool contract. Only its explicit create/apply
+ * actions become a learned-skill notice; arbitrary tool titles and result prose do
+ * not affect the chat timeline.
+ */
+private fun ChatToolActivity.skillLearnedNotice(): SkillLearnedNoticeData? {
+  if (name.trim() != "skill_workshop" || isError) return null
+  val action = arguments?.get("action").asStringOrNull() ?: return null
+  if (action != "create" && action != "apply") return null
+  val skillName =
+    arguments
+      ?.get("name")
+      .asStringOrNull()
+      ?.trim()
+      ?.takeIf(String::isNotEmpty)
+      ?: return null
+  val proposalId =
+    arguments
+      ?.get("proposal_id")
+      .asStringOrNull()
+      ?.trim()
+      ?.takeIf(String::isNotEmpty)
+  return SkillLearnedNoticeData(skillName = skillName, proposalId = proposalId)
+}
+
+private fun kotlinx.serialization.json.JsonElement?.asStringOrNull(): String? =
+  (this as? JsonPrimitive)?.contentOrNull
+
 /** Build transcript rows in source order so hidden turn boundaries fence tool groups. */
 private fun buildTranscriptTimeline(messages: List<ChatMessage>): List<ChatTimelineItem> {
   val toolsByMessage = projectTranscriptToolActivity(messages)
@@ -375,6 +649,15 @@ private fun buildTranscriptTimeline(messages: List<ChatMessage>): List<ChatTimel
 
     fun flushCompletedTools() {
       if (completedTools.isEmpty()) return
+      completedTools.mapNotNull { it.skillLearnedNotice() }.forEach { notice ->
+        add(
+          ChatTimelineItem.SkillLearnedNotice(
+            key = "${checkNotNull(completedToolsKey)}:${notice.proposalId ?: notice.skillName}",
+            skillName = notice.skillName,
+            proposalId = notice.proposalId,
+          ),
+        )
+      }
       add(ChatTimelineItem.CompletedTools(checkNotNull(completedToolsKey), coalesceToolActivity(completedTools), completedToolsTurnBoundary))
       completedTools.clear()
       completedToolsKey = null
@@ -400,6 +683,9 @@ private fun buildTranscriptTimeline(messages: List<ChatMessage>): List<ChatTimel
         completedTools.addAll(tools)
       } else {
         flushCompletedTools()
+        tools.mapNotNull { it.skillLearnedNotice() }.forEach { notice ->
+          add(ChatTimelineItem.SkillLearnedNotice("$key:${notice.proposalId ?: notice.skillName}", notice.skillName, notice.proposalId))
+        }
         val classified = classifyTranscriptMessage(message, index)
         val reasoningRow = classified?.reasoningOnlyRow()
         if (reasoningRow != null) {
@@ -625,6 +911,8 @@ private fun latestContentVersion(
   moreWorkingCount: Int,
   stream: String?,
   thinking: String? = null,
+  livePhaseCheckpoints: List<ChatLivePhaseCheckpoint> = emptyList(),
+  turnWorking: Boolean = false,
   outboxItems: List<ChatOutboxItem> = emptyList(),
   questions: List<ChatQuestionPrompt> = emptyList(),
 ): String {
@@ -642,8 +930,19 @@ private fun latestContentVersion(
     append(latest?.turnBoundary ?: false)
     append(":thinking=")
     append(thinking?.hashCode() ?: 0)
+    append(":phases=")
+    livePhaseCheckpoints.forEach { checkpoint ->
+      append(checkpoint.toolCallId)
+      append(',')
+      append(checkpoint.textSnapshot.length)
+      append(',')
+      append(checkpoint.thinkingSnapshot.length)
+      append(';')
+    }
     append(":runs=")
     append(pendingRunCount)
+    append(":turnWorking=")
+    append(turnWorking)
     append(":tools=")
     pendingToolCalls.forEach { call ->
       append(call.toolCallId)
@@ -705,14 +1004,15 @@ internal fun chatTimelineItemKey(item: ChatTimelineItem): String =
     is ChatTimelineItem.OutboxCommand -> "outbox:${item.item.id}"
     is ChatTimelineItem.RecoveryOutboxCommand -> "outbox-recovery:${item.item.id}"
     is ChatTimelineItem.OutboxRecoveryHeader -> "outbox-recovery-header"
-    is ChatTimelineItem.PendingTools -> "tools"
+    is ChatTimelineItem.PendingTools -> item.key
     is ChatTimelineItem.CompletedTools -> "completed-tools:${item.key}"
     is ChatTimelineItem.SubagentActivity -> "subagent-activity"
     is ChatTimelineItem.QuestionPrompt -> "question:${item.prompt.record.id}"
     is ChatTimelineItem.TurnRecapSummary -> "turn-recap"
     is ChatTimelineItem.SystemNotice -> item.key
     is ChatTimelineItem.SystemDivider -> item.key
-    is ChatTimelineItem.StreamingAssistant -> "stream"
+    is ChatTimelineItem.SkillLearnedNotice -> "skill-learned:${item.key}"
+    is ChatTimelineItem.StreamingAssistant -> item.key
     is ChatTimelineItem.CollapsedSteps -> item.key
     is ChatTimelineItem.Thinking -> "thinking:${item.key ?: item.streaming}"
   }
@@ -844,6 +1144,7 @@ private fun mergeToolActivity(
     result = next.result ?: previous.result,
     isError = previous.isError || next.isError,
     arguments = previous.arguments ?: next.arguments,
+    title = previous.title ?: next.title,
   )
 
 private fun coalesceToolActivity(parts: List<ChatToolActivity>): List<ChatToolActivity> {

@@ -738,6 +738,8 @@ class MainViewModel private constructor(
     runtimeState(initial = emptySet()) { it.chatPendingSessionSettingsKeys }
   val chatStreamingAssistantText: StateFlow<String?> = runtimeState(initial = null) { it.chatStreamingAssistantText }
   val chatStreamingThinkingText: StateFlow<String?> = runtimeState(initial = null) { it.chatStreamingThinkingText }
+  val chatLivePhaseCheckpoints: StateFlow<List<ai.openclaw.app.chat.ChatLivePhaseCheckpoint>> =
+    runtimeState(initial = emptyList()) { it.chatLivePhaseCheckpoints }
   val chatPendingToolCalls: StateFlow<List<ChatPendingToolCall>> = runtimeState(initial = emptyList()) { it.chatPendingToolCalls }
   val chatSubagentActivities: StateFlow<Map<String, ai.openclaw.app.chat.ChatSubagentActivity>> =
     runtimeState(initial = emptyMap()) { it.chatSubagentActivities }
@@ -1843,11 +1845,16 @@ class MainViewModel private constructor(
     }
   }
 
-  /** Remembers a custom session group locally so it renders as an empty section. */
+  /**
+   * Remembers a custom session group locally so it renders as an empty section,
+   * and registers it on the gateway so the group survives a reinstall and shows
+   * up in the Control UI before any thread joins it.
+   */
   fun addChatSessionGroup(name: String) {
     val trimmed = name.trim()
     if (trimmed.isEmpty()) return
     prefs.setSessionCustomGroups(prefs.sessionCustomGroups.value + trimmed)
+    runtimeRef.value?.let { runtime -> viewModelScope.launch { runtime.registerChatSessionGroup(trimmed) } }
   }
 
   suspend fun renameChatSessionGroup(

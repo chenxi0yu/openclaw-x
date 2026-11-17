@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.backdrops.LayerBackdrop
@@ -94,6 +95,7 @@ internal fun Modifier.clawLiquidButton(
   surface: Color,
   dark: Boolean,
   shape: RoundedCornerShape = RoundedCornerShape(percent = 50),
+  blurRadius: Dp = 3.dp,
 ): Modifier {
   if (backdrop == null) {
     return background(surface)
@@ -104,7 +106,7 @@ internal fun Modifier.clawLiquidButton(
     shape = { shape },
     effects = {
       vibrancy()
-      blur(3.dp.toPx())
+      blur(blurRadius.toPx())
       lens(8.dp.toPx(), 24.dp.toPx())
     },
     onDrawSurface = {

@@ -6,6 +6,7 @@ import ai.openclaw.app.ui.image.decodeRemoteImageBitmap
 import ai.openclaw.app.ui.image.safeRemoteImageStore
 import android.graphics.Bitmap
 import android.util.Base64
+import android.util.LruCache
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -32,6 +33,7 @@ import java.util.Locale
 
 private const val AGENT_AVATAR_MAX_DIMENSION = 256
 private const val AGENT_AVATAR_MAX_BYTES = 2 * 1024 * 1024
+private const val AGENT_AVATAR_CACHE_MAX_BYTES = 4 * 1024 * 1024
 private const val AGENT_AVATAR_MAX_DATA_URL_PREFIX_CHARS = 26
 
 // Keep Android decoding inside the Gateway's shared avatar payload boundary.
@@ -50,6 +52,50 @@ internal sealed interface AgentAvatarSource {
   data class Remote(
     val url: String,
   ) : AgentAvatarSource
+}
+
+/**
+ * Process-wide decoded avatar cache. Catalog refreshes and picker recompositions reuse the
+ * same payload strings, so a keyed cache is all that stands between a blink and no blink.
+ */
+private object AgentAvatarDecodeCache {
+  private val bitmaps =
+    object : LruCache<String, Bitmap>(AGENT_AVATAR_CACHE_MAX_BYTES) {
+      override fun sizeOf(
+        key: String,
+        value: Bitmap,
+      ): Int = value.allocationByteCount
+    }
+  private val byteArrays =
+    object : LruCache<String, ByteArray>(AGENT_AVATAR_CACHE_MAX_BYTES) {
+      override fun sizeOf(
+        key: String,
+        value: ByteArray,
+      ): Int = value.size
+    }
+
+  fun key(
+    mimeType: String,
+    base64: String,
+  ): String = "$mimeType:${base64.hashCode()}:${base64.length}"
+
+  fun bitmap(key: String): Bitmap? = bitmaps.get(key)
+
+  fun putBitmap(
+    key: String,
+    bitmap: Bitmap,
+  ) {
+    bitmaps.put(key, bitmap)
+  }
+
+  fun bytes(key: String): ByteArray? = byteArrays.get(key)
+
+  fun putBytes(
+    key: String,
+    bytes: ByteArray,
+  ) {
+    byteArrays.put(key, bytes)
+  }
 }
 
 /** Returns the authoritative Android-renderable agent avatar source, if present. */
@@ -104,9 +150,11 @@ private fun RasterDataAgentAvatar(
   shape: Shape,
   fallback: @Composable () -> Unit,
 ) {
-  var bitmap by remember(source) { mutableStateOf<Bitmap?>(null) }
-  LaunchedEffect(source) {
-    bitmap =
+  val cacheKey = remember(source) { AgentAvatarDecodeCache.key(source.mimeType, source.base64) }
+  var bitmap by remember(cacheKey) { mutableStateOf(AgentAvatarDecodeCache.bitmap(cacheKey)) }
+  LaunchedEffect(cacheKey) {
+    if (bitmap != null) return@LaunchedEffect
+    val decoded =
       withContext(Dispatchers.Default) {
         val bytes = decodeAgentAvatarBase64(source.base64) ?: return@withContext null
         decodeRemoteImageBitmap(
@@ -115,6 +163,10 @@ private fun RasterDataAgentAvatar(
           expectedContentType = source.mimeType,
         )
       }
+    if (decoded != null) {
+      AgentAvatarDecodeCache.putBitmap(cacheKey, decoded)
+      bitmap = decoded
+    }
   }
   val resolved = bitmap
   if (resolved == null) {
@@ -136,8 +188,9 @@ private fun RemoteAgentAvatar(
   shape: Shape,
   fallback: @Composable () -> Unit,
 ) {
-  var result by remember(url) { mutableStateOf<RemoteImageResult?>(null) }
+  var result by remember(url) { mutableStateOf(safeRemoteImageStore.peek(url)) }
   LaunchedEffect(url) {
+    if (result != null) return@LaunchedEffect
     result = safeRemoteImageStore.get(url)
   }
   when (val image = result) {
@@ -167,12 +220,15 @@ private fun SvgAgentAvatar(
   shape: Shape,
   fallback: @Composable () -> Unit,
 ) {
-  var bytes by remember(base64) { mutableStateOf<ByteArray?>(null) }
-  LaunchedEffect(base64) {
-    bytes =
-      withContext(Dispatchers.Default) {
-        decodeAgentAvatarBase64(base64)
-      }
+  val cacheKey = remember(base64) { AgentAvatarDecodeCache.key("image/svg+xml", base64) }
+  var bytes by remember(cacheKey) { mutableStateOf(AgentAvatarDecodeCache.bytes(cacheKey)) }
+  LaunchedEffect(cacheKey) {
+    if (bytes != null) return@LaunchedEffect
+    val decoded = withContext(Dispatchers.Default) { decodeAgentAvatarBase64(base64) }
+    if (decoded != null) {
+      AgentAvatarDecodeCache.putBytes(cacheKey, decoded)
+      bytes = decoded
+    }
   }
   val resolved = bytes
   if (resolved == null) {

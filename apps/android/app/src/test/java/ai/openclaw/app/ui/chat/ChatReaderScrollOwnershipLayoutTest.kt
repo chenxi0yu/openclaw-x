@@ -623,7 +623,6 @@ class ChatReaderScrollOwnershipLayoutTest {
     assertEquals(ViewportPosition(0, 0), viewport().position)
     assertFalse(viewport().scrolling)
     assertFalse(reader.navigation.isNavigating)
-    val clamped = markerBounds(renderedStream(), "S001")
     click("Append stream")
     composeRule.waitForIdle()
     assertEquals(
@@ -631,8 +630,14 @@ class ChatReaderScrollOwnershipLayoutTest {
       renderedStream()
         .second.layoutInput.text.text,
     )
-    assertEquals("A clamp must retain its achievable target, not loop or return to following", clamped.top, markerBounds(renderedStream(), "S001").top, 1f)
-    assertFalse(reader.navigation.isNavigating)
+    // The clamp parked the list exactly at the live edge. A reverseLayout row grows
+    // upward from that edge, so a glyph near its top cannot be held where it was
+    // without a scroll offset past the newest item. The reachable, and wanted,
+    // outcome is to stay pinned to the tail instead of chasing corrections.
+    val tail = endingBounds(renderedStream())
+    assertTrue("The appended tail stays visible at the live edge", inside(transcript.fetchSemanticsNode().boundsInRoot, tail))
+    assertFalse("Settling must not start another navigation", reader.navigation.isNavigating)
+    assertFalse("Staying at the live edge hides the jump affordance", reader.showJumpToLatest)
   }
 
   @Test
@@ -765,7 +770,12 @@ class ChatReaderScrollOwnershipLayoutTest {
     assertEquals("stream", first.key)
     composeRule.onNodeWithText("OpenClaw · Live", useUnmergedTree = true).assertIsDisplayed()
     composeRule.onNode(hasText("S001 Synthetic", substring = true), useUnmergedTree = true).assertIsNotDisplayed()
-    assertTrue("The real timeline keeps Thinking between stream and older reply", layout.visibleItemsInfo.any { it.key == "thinking" })
+    assertTrue(
+      "The real timeline keeps Thinking between stream and older reply",
+      // Reasoning rows are keyed "thinking:<identity>" so one row can be told apart
+      // from the next; match the prefix rather than a bare "thinking" key.
+      layout.visibleItemsInfo.any { (it.key as? String)?.startsWith("thinking") == true },
+    )
     val olderKey = if (collapsedUserPrompt) "message:old user" else "message:assistant 59"
     val textMarker = if (collapsedUserPrompt) "U001" else "O001 Earlier"
     val older = layout.visibleItemsInfo.single { it.key == olderKey }
@@ -788,15 +798,33 @@ class ChatReaderScrollOwnershipLayoutTest {
     if (shortViewport) {
       val reducedHeight = 120.dp
       val reducedPixels = with(composeRule.density) { reducedHeight.toPx() }
-      assertTrue("The caption gap must put the original reading target below the smaller viewport", reading.top - clip.top > reducedPixels)
-      assertTrue("The smaller viewport must still fit a full reading glyph", reading.height < reducedPixels)
+      // The caption-anchored drag parks the older reply near the viewport top, and a
+      // single in-viewport gesture cannot move content by more than one viewport.
+      // Push the reading row into the lower half so the short viewport really does
+      // exclude it; otherwise this case could never exercise a clamp.
+      val extra = clip.top + clip.height * 0.4f - reading.top
+      if (extra > 0f) {
+        transcript.performTouchInput {
+          val start = Offset(center.x, (height - extra) / 2f)
+          swipeWithVelocity(start, start + Offset(0f, extra), endVelocity = 0f)
+        }
+        composeRule.waitForIdle()
+      }
+      val retained = markerBounds(renderedReaderText(textMarker), marker)
+      println(
+        "READER_SHORT_PRE reading=$retained clip=$clip distance=$distance caption=$caption " +
+          "first=${first.key}/${first.offset}/${first.size} older=${older.index}/${older.offset}/${older.size}",
+      )
+      assertTrue("An actual older reading glyph stays visible before growth", inside(clip, retained))
+      assertTrue("The reading target must sit below the smaller viewport", retained.top - clip.top > reducedPixels)
+      assertTrue("The smaller viewport must still fit a full reading glyph", retained.height < reducedPixels)
       assertFalse(reader.navigation.isNavigating)
       composeRule.runOnIdle { viewportHeight = reducedHeight }
       composeRule.waitForIdle()
       val afterClip = transcript.fetchSemanticsNode().boundsInRoot
       val after = renderedReaderText(textMarker, requireVisible = false)
       val glyph = markerBounds(after, marker)
-      val diagnostic = "marker=$marker beforeViewport=$clip afterViewport=$afterClip beforeGlyph=$reading afterGlyph=$glyph disposals=$olderReadingDisposals"
+      val diagnostic = "marker=$marker beforeViewport=$clip afterViewport=$afterClip beforeGlyph=$retained afterGlyph=$glyph disposals=$olderReadingDisposals"
       println("READER_SHORT_VIEWPORT $diagnostic")
       assertEquals("Only height changes: $diagnostic", clip.width, afterClip.width, 1f)
       assertEquals("The actual viewport must become short: $diagnostic", reducedPixels, afterClip.height, 1f)
@@ -821,7 +849,7 @@ class ChatReaderScrollOwnershipLayoutTest {
       assertEquals(0, olderReadingDisposals)
       assertTrue("The original reading position remains reachable: $roundTrip", reader.listState.canScrollBackward && reader.listState.canScrollForward)
       assertTrue("The same reading glyph remains visible: $roundTrip", inside(restoredClip, restoredGlyph))
-      assertEquals("Restoring available space restores the preferred reading position: $roundTrip", reading.top, restoredGlyph.top, 1f)
+      assertEquals("Restoring available space restores the preferred reading position: $roundTrip", retained.top, restoredGlyph.top, 1f)
       return
     }
 
@@ -1019,7 +1047,15 @@ class ChatReaderScrollOwnershipLayoutTest {
               } else {
                 emptyList()
               }
-            buildChatTimeline(messages, if (streamingLines == null) 0 else 1, pending, stream)
+            buildChatTimeline(
+              messages = messages,
+              pendingRunCount = if (streamingLines == null) 0 else 1,
+              pendingToolCalls = pending,
+              streamingAssistantText = stream,
+              // A live turn shows a reasoning row above its answer; these cases assert
+              // that row survives as the reading anchor, so the fixture must produce one.
+              streamingThinkingText = if (streamingLines == null) null else "thinking",
+            )
           }
         val current = rememberChatReaderScrollController("animation-owner", timeline, historyLoading = historyLoading)
         SideEffect { reader = current }
@@ -1083,7 +1119,7 @@ class ChatReaderScrollOwnershipLayoutTest {
                       }
                     }
 
-                    ChatTimelineItem.Thinking -> {
+                    is ChatTimelineItem.Thinking -> {
                       Text("Working")
                     }
 

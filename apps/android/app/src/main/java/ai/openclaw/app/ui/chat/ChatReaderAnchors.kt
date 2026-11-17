@@ -126,6 +126,12 @@ internal class ChatReaderAnchors(
     if (value.viewportSize != view.size) {
       value.targetY = value.preferredY.coerceIn(0f, (view.size.height - height).coerceAtLeast(0f))
       value.viewportSize = view.size
+      // A resize is fresh geometry, not a direction reversal inside the text. The
+      // jitter guard below must not outlive it, or the reader could never be
+      // restored after the viewport that clamped them grows back.
+      lastCorrectionDirection = 0
+      correctionReversals = 0
+      correctionSuppressed = false
     }
     value.extentHeight = height
     return top
@@ -203,6 +209,11 @@ internal class ChatReaderAnchors(
   fun needsCorrection(): Boolean =
     !correctionSuppressed && current()?.let { (point, y) -> (point.targetY - y).roundToInt() != 0 } == true
 
+  /**
+   * Moves the content by [delta] pixels of *screen* movement: positive pushes the
+   * anchored glyph down the viewport. Returns how much of it was actually applied,
+   * which is less than [delta] at a scroll boundary.
+   */
   fun correct(
     scroll: (Float) -> Float,
   ) {

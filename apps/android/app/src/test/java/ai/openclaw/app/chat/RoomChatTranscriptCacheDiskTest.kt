@@ -2,7 +2,6 @@ package ai.openclaw.app.chat
 
 import ai.openclaw.app.ui.chat.ChatTimelineItem
 import ai.openclaw.app.ui.chat.buildChatTimeline
-import ai.openclaw.app.ui.chat.withCompletedWorkGroups
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -159,9 +158,7 @@ class RoomChatTranscriptCacheDiskTest {
         assertEquals(4, loaded.size)
         assertTrue(loaded[1].turnBoundary)
         assertTrue(loaded[1].content.isEmpty())
-        val timeline =
-          buildChatTimeline(loaded, 0, emptyList(), null)
-            .withCompletedWorkGroups(loaded, false, emptySet(), "agent:main:dashboard:review")
+        val timeline = buildChatTimeline(loaded, 0, emptyList(), null)
         assertEquals(
           listOf("second complete", "first complete"),
           timeline.items.filterIsInstance<ChatTimelineItem.Message>().map {

@@ -185,6 +185,8 @@ data class ChatToolActivity(
   val result: String?,
   val isError: Boolean,
   val arguments: kotlinx.serialization.json.JsonObject? = null,
+  /** Gateway-supplied description of what the call does; preferred over the raw command. */
+  val title: String? = null,
 )
 
 data class ChatWidgetPreview(
@@ -210,16 +212,32 @@ data class ChatPendingToolCall(
   /**
    * Human readable object shown after the verb. Gateways from 2026.9 on report
    * tool progress through stream:"item", which carries no arguments — only a
-   * title and a meta line. This holds that line so a row still reads
+   * title and a meta line. This holds the meta line so a row still reads
    * 正在抓取 https://… instead of a bare verb.
    */
   val label: String? = null,
+  /** Gateway title describing the call; shown instead of the command when present. */
+  val title: String? = null,
   /**
    * Set when the gateway reports the item finished. The row stays until the run
    * settles so the verb can flip to 已抓取; removing it here would blank the
    * row for the second or two before the transcript catches up.
    */
   val done: Boolean = false,
+)
+
+/**
+ * Snapshots both live buffers at the moment a tool started. The live
+ * transcript diffs consecutive snapshots into phases so the pre-tool prose
+ * stays above the tool it preceded while the run is still streaming. Storing
+ * snapshots (not lengths) also survives a provider replacing the thinking
+ * buffer with a new item.
+ */
+data class ChatLivePhaseCheckpoint(
+  val toolCallId: String,
+  val textSnapshot: String,
+  val thinkingSnapshot: String,
+  val startedAtMs: Long,
 )
 
 data class ChatDiffStat(

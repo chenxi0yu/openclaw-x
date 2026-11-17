@@ -46,7 +46,7 @@ private val chatMathLayoutDispatcher =
   }.asCoroutineDispatcher()
 
 // Parsing is pure CPU and keyed on every visual input, so a formula repeated
-// across a transcript (or across typewriter frames) is laid out exactly once.
+// across a transcript (or across live reveal frames) is laid out exactly once.
 private val chatMathLayoutCache = LruCache<String, ChatMathLayout>(MATH_LAYOUT_CACHE_ENTRIES)
 
 /** Synchronous cache probe; lets an already-laid-out formula skip the frame gap. */

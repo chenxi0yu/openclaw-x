@@ -58,7 +58,9 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.Base64
 import java.util.Locale
 import java.util.UUID
@@ -77,6 +79,10 @@ private const val WEAR_AGENT_PULSE_SWARM_MAX_ROWS = 1_000
 private const val WEAR_AGENT_PULSE_SWARM_FETCH_LIMIT = WEAR_AGENT_PULSE_SWARM_MAX_ROWS + 1
 private const val WEAR_AGENT_PULSE_DIRECT_CHILDREN_GROUP = "__wear_agent_pulse_direct_children__"
 private const val SUBAGENT_ACTIVITY_RETENTION_MS = 60_000L
+// Gateway titles only ride the live item stream. Keep a bounded per-session copy so
+// the persisted row that replaces the live row keeps the human title, not the command.
+private const val MAX_LIVE_TOOL_TITLES_PER_SESSION = 200
+private const val MAX_LIVE_TOOL_TITLE_SESSIONS = 8
 private const val RUN_ACTIVITY_COMPLETED_DISPLAY_MS = 2_500L
 private const val RUN_ACTIVITY_DISCONNECT_DISPLAY_MS = 120_000L
 private const val MAX_RETAINED_TERMINAL_SUBAGENT_TASKS = 100
@@ -555,6 +561,14 @@ class ChatController internal constructor(
   val streamingThinkingText: StateFlow<String?> = _streamingThinkingText.asStateFlow()
   private var streamingThinkingOwner: ChatRunOwner? = null
 
+  // Tool starts split the cumulative live text/thinking buffers into ordered
+  // phases. The transcript is built from message boundaries, so without these
+  // offsets the single merged live buffer renders pre-tool prose below the tool
+  // and then jumps above it when history lands.
+  private val _livePhaseCheckpoints = MutableStateFlow<List<ChatLivePhaseCheckpoint>>(emptyList())
+  val livePhaseCheckpoints: StateFlow<List<ChatLivePhaseCheckpoint>> = _livePhaseCheckpoints.asStateFlow()
+  private var livePhaseOwner: ChatRunOwner? = null
+
   // Aggregate glanceable phase of the locally tracked run for live notifications.
   // Mutated only under gatewayScopeApplyLock; [runActivityPhaseRunId] attributes
   // the phase so another client's terminal cannot retire our run's activity.
@@ -599,6 +613,7 @@ class ChatController internal constructor(
   }
 
   private val pendingToolCallsById = ConcurrentHashMap<String, OwnedPendingToolCall>()
+  private val liveToolTitlesBySession = mutableMapOf<String, MutableMap<String, String>>()
   private val _pendingToolCalls = MutableStateFlow<List<ChatPendingToolCall>>(emptyList())
   val pendingToolCalls: StateFlow<List<ChatPendingToolCall>> = _pendingToolCalls.asStateFlow()
 
@@ -1526,46 +1541,62 @@ class ChatController internal constructor(
     }
   }
 
-  /** Renames a session group everywhere: every member session moves to the new category. */
+  /** Renames a session group everywhere: the gateway rewrites every member's category. */
   suspend fun renameSessionGroup(
     from: String,
     to: String,
   ) {
     val fromName = from.trim().takeIf { it.isNotEmpty() } ?: return
     val toName = to.trim().takeIf { it.isNotEmpty() } ?: return
-    patchSessionGroupMembers(group = fromName, category = toName)
+    if (fromName == toName) return
+    mutateSessionGroups(method = "sessions.groups.rename", name = fromName, to = toName)
   }
 
   /** Deletes a session group: member sessions are kept and move back to Ungrouped. */
   suspend fun dissolveSessionGroup(group: String) {
     val groupName = group.trim().takeIf { it.isNotEmpty() } ?: return
-    patchSessionGroupMembers(group = groupName, category = null)
+    mutateSessionGroups(method = "sessions.groups.delete", name = groupName, to = null)
   }
 
-  private suspend fun patchSessionGroupMembers(
-    group: String,
-    category: String?,
+  /**
+   * Registers a group that has no members yet. `put` replaces the whole table, so
+   * the current names are read first — same order the Control UI uses.
+   */
+  suspend fun registerSessionGroup(group: String) {
+    val groupName = group.trim().takeIf { it.isNotEmpty() } ?: return
+    try {
+      val existing = listSessionGroups()
+      if (existing.any { it.equals(groupName, ignoreCase = true) }) return
+      val params =
+        buildJsonObject {
+          put(
+            "names",
+            buildJsonArray {
+              existing.forEach { add(JsonPrimitive(it)) }
+              add(JsonPrimitive(groupName))
+            },
+          )
+        }
+      requestGateway("sessions.groups.put", params.toString())
+    } catch (err: CancellationException) {
+      throw err
+    } catch (err: Throwable) {
+      updateErrorText(err.message)
+    }
+  }
+
+  private suspend fun mutateSessionGroups(
+    method: String,
+    name: String,
+    to: String?,
   ) {
     try {
-      val ownerAgentId = resolveAgentIdForSessionKey(_sessionKey.value) ?: return
-      var firstError: Throwable? = null
-      for (member in listSessionGroupMembers(group, ownerAgentId)) {
-        try {
-          val params =
-            buildJsonObject {
-              put("key", JsonPrimitive(member.key))
-              put("agentId", JsonPrimitive(ownerAgentId))
-              put("category", category?.let(::JsonPrimitive) ?: JsonNull)
-            }
-          requestGateway("sessions.patch", params.toString())
-        } catch (err: CancellationException) {
-          throw err
-        } catch (err: Throwable) {
-          // Best-effort: one failed member patch must not strand the rest of the group.
-          if (firstError == null) firstError = err
+      val params =
+        buildJsonObject {
+          put("name", JsonPrimitive(name))
+          to?.let { put("to", JsonPrimitive(it)) }
         }
-      }
-      firstError?.let { updateErrorText(it.message) }
+      requestGateway(method, params.toString())
       fetchSessionsForCurrentWindow()
     } catch (err: CancellationException) {
       throw err
@@ -1574,32 +1605,20 @@ class ChatController internal constructor(
     }
   }
 
-  /**
-   * Enumerates every session assigned to the group. The UI session list is windowed
-   * (limited, archived either-or), so group mutations must not derive membership from
-   * it. An absent limit is capped at 100 rows server-side, so both queries send an
-   * explicit high bound; sessions.list filters archived rows either-or, hence two calls.
-   */
-  private suspend fun listSessionGroupMembers(
-    group: String,
-    ownerAgentId: String,
-  ): List<ChatSessionEntry> {
-    val members = LinkedHashMap<String, ChatSessionEntry>()
-    for (archived in listOf(false, true)) {
-      val params =
-        buildJsonObject {
-          put("includeGlobal", JsonPrimitive(true))
-          put("includeUnknown", JsonPrimitive(false))
-          put("agentId", JsonPrimitive(ownerAgentId))
-          put("limit", JsonPrimitive(GROUP_MEMBER_FETCH_LIMIT))
-          if (archived) put("archived", JsonPrimitive(true))
-        }
-      val rows = parseSessions(requestGateway("sessions.list", params.toString())).sessions
-      for (row in rows) {
-        if (row.category?.trim() == group && !members.containsKey(row.key)) members[row.key] = row
-      }
-    }
-    return members.values.toList()
+  /** Names known to the gateway, including groups that hold no sessions. */
+  private suspend fun listSessionGroups(): List<String> {
+    val result = requestGateway("sessions.groups.list", "{}")
+    val groups =
+      runCatching {
+        Json.parseToJsonElement(result)
+          .jsonObject["groups"]
+          ?.jsonArray
+          .orEmpty()
+          .mapNotNull { element ->
+            element.jsonObject["name"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+          }
+      }.getOrDefault(emptyList())
+    return groups
   }
 
   internal suspend fun deleteSession(
@@ -4981,7 +5000,16 @@ class ChatController internal constructor(
                 // history for that same session must not repaint the empty chat.
                 val incoming =
                   if (pendingLocalNewChat.value) emptyList() else history.messages
-                val nextMessages = mergeOptimisticMessages(incoming = incoming, optimistic = optimisticMessagesByRunId.values)
+                // History never carries the gateway title, so rows rebuilt from it would drop
+                // back to the raw command. Keep the titles already known for this session:
+                // cached rows plus whatever the live stream reported during this process.
+                val rememberedTitles =
+                  collectToolTitles(_messages.value) + liveToolTitles(sessionKey)
+                val nextMessages =
+                  carryToolTitles(
+                    mergeOptimisticMessages(incoming = incoming, optimistic = optimisticMessagesByRunId.values),
+                    rememberedTitles,
+                  )
                 // Merge before pruning: the canonical user row often arrives without inline
                 // media, so pruning the optimistic row first would discard the only image bytes.
                 prunePersistedOptimisticMessages(history.messages)
@@ -5032,6 +5060,11 @@ class ChatController internal constructor(
                 }
                 if (reconcileRunState) {
                   reconciliationRunIds.forEach { runId ->
+                    // Gateway transcripts can trail their terminal event. Retiring
+                    // the live answer before this snapshot owns it blanks the whole
+                    // chain for a frame and yanks the reader; keep it mounted until
+                    // the reply (or the no-reply outcome) is proven by history.
+                    if (unresolvedRepliesByRunId.containsKey(runId)) return@forEach
                     if (terminalHistoryPendingRunIds.remove(runId)) {
                       clearLiveRunUi(runId)
                     }
@@ -5045,7 +5078,9 @@ class ChatController internal constructor(
                   requestCacheScope,
                   requestAgentId,
                   sessionKey,
-                  history.messages,
+                  // Persist the carried projection, not the raw history: otherwise the
+                  // gateway titles are lost on the next cold start.
+                  nextMessages,
                   appliedHistoryEntry.takeIf { appliedPurpose == HistoryRefreshPurpose.RestoreSession && history.sessionInfo != null },
                 )
                 HistoryRefreshResult.Applied(historyBranchState, appliedPurpose)
@@ -6714,20 +6749,21 @@ class ChatController internal constructor(
         "delta" -> {
           // Only show streaming text for runs we initiated in this controller.
           if (!isPending) return
-          // Current gateways expose either a cumulative streamText snapshot,
-          // deltaText chunks, or the older assistant message shape. Prefer the
-          // snapshot when present so a packet containing both cannot duplicate it.
+          // Every current gateway delta carries the merged cumulative message.
+          // Treat it as the source of truth so a dropped incremental frame
+          // self-heals on the next snapshot instead of leaving a hole until the
+          // final transcript. `deltaText` remains only as a legacy fallback.
           val streamText = payload["streamText"].asStringOrNull()
           val deltaText = payload["deltaText"].asStringOrNull()
           val replace = payload["replace"].asBooleanOrNull() == true
-          val messageText = parseAssistantDeltaText(payload)
+          val messageText = parseAssistantMessageText(payload)
+          val snapshotText = streamText ?: messageText
           when {
-            streamText != null -> updateStreamingAssistantText(runId, streamText)
+            snapshotText != null -> updateStreamingAssistantText(runId, snapshotText)
             replace && deltaText != null -> updateStreamingAssistantText(runId, deltaText)
             !deltaText.isNullOrEmpty() -> {
               appendStreamingAssistantDelta(runId, deltaText)
             }
-            messageText != null -> updateStreamingAssistantText(runId, messageText)
           }
           val thinking = parseAssistantDeltaThinking(payload)
           if (!thinking.isNullOrEmpty()) {
@@ -6767,6 +6803,21 @@ class ChatController internal constructor(
             runId = runId,
             owner = currentChatComposerRoutingOwner(),
           )
+          // The terminal message is the complete merged text. Applying it
+          // before the history wait closes any gap left by a dropped delta so
+          // the live row never shows a truncated last frame.
+          val finalOwner = runId?.let(::liveRunOwner)
+          if (
+            state == "final" &&
+            finalOwner != null &&
+            (streamingAssistantOwner == null || streamingAssistantOwner == finalOwner)
+          ) {
+            val finalText = parseAssistantMessageText(payload)?.takeIf(String::isNotEmpty)
+            val currentText = _streamingAssistantText.value
+            if (finalText != null && (currentText == null || finalText.length >= currentText.length)) {
+              updateStreamingAssistantText(runId, finalText)
+            }
+          }
           if (wasTimedOut) {
             val hasNewerRun =
               synchronized(pendingRuns) { pendingRuns.isNotEmpty() } || unresolvedRepliesByRunId.isNotEmpty()
@@ -7192,19 +7243,9 @@ class ChatController internal constructor(
         )
       }
 
-      "assistant" -> {
-        val text = data?.get("text")?.asStringOrNull()
-        val delta = data?.get("delta")?.asStringOrNull()
-        val replace = data?.get("replace").asBooleanOrNull() == true
-        when {
-          replace && text != null -> updateStreamingAssistantText(runId, text)
-          replace && delta != null -> updateStreamingAssistantText(runId, delta)
-          !text.isNullOrEmpty() -> {
-            updateStreamingAssistantText(runId, text)
-          }
-          !delta.isNullOrEmpty() -> appendStreamingAssistantDelta(runId, delta)
-        }
-      }
+      // Assistant text is owned by the projected chat stream. Raw agent
+      // assistant events carry only the current item's text and would overwrite
+      // the merged buffer on every tool turn.
 
       "tool" -> {
         val phase = data?.get("phase")?.asStringOrNull()
@@ -7213,6 +7254,8 @@ class ChatController internal constructor(
         if (phase.isNullOrEmpty() || name.isNullOrEmpty() || toolCallId.isNullOrEmpty()) return
 
         val ts = payload["ts"].asLongOrNull() ?: System.currentTimeMillis()
+        val toolTitle = data.get("title").asStringOrNull()
+        rememberLiveToolTitle(sessionKey ?: _sessionKey.value, toolCallId, toolTitle)
         synchronized(gatewayScopeApplyLock) {
           // liveRunOwner already attributes a null runId to a sole pending run.
           // If it still returns null the event is unattributable, and storing
@@ -7221,6 +7264,7 @@ class ChatController internal constructor(
           val owner = liveRunOwner(runId) ?: return
           when (phase) {
             "start" -> {
+              recordLivePhaseCheckpoint(owner, toolCallId, ts)
               val existing = pendingToolCallsById[toolCallId]?.takeIf { it.owner == owner }?.call
               pendingToolCallsById[toolCallId] =
                 OwnedPendingToolCall(
@@ -7232,6 +7276,8 @@ class ChatController internal constructor(
                     startedAtMs = existing?.startedAtMs ?: ts,
                     isError = null,
                     liveDiff = existing?.liveDiff,
+                    label = existing?.label,
+                    title = existing?.title ?: toolTitle?.trim()?.takeIf { it.isNotEmpty() },
                   ),
                 )
               publishPendingToolCalls()
@@ -7282,15 +7328,16 @@ class ChatController internal constructor(
 
         val ts = payload["ts"].asLongOrNull() ?: System.currentTimeMillis()
         val status = data.get("status").asStringOrNull()
-        val label =
-          data.get("meta").asStringOrNull()
-            ?: data.get("title").asStringOrNull()
+        val title = data.get("title").asStringOrNull()
+        val meta = data.get("meta").asStringOrNull()
+        rememberLiveToolTitle(sessionKey ?: _sessionKey.value, toolCallId, title)
         synchronized(gatewayScopeApplyLock) {
           // Same guard as the legacy tool branch: an unattributable event stored
           // with a null owner could never be cleared again.
           val owner = liveRunOwner(runId) ?: return
           when (phase) {
             "start", "update", "end" -> {
+              if (phase == "start") recordLivePhaseCheckpoint(owner, toolCallId, ts)
               val existing = pendingToolCallsById[toolCallId]?.takeIf { it.owner == owner }?.call
               val finished = phase == "end" || status == "completed" || status == "failed"
               pendingToolCallsById[toolCallId] =
@@ -7303,7 +7350,8 @@ class ChatController internal constructor(
                     startedAtMs = existing?.startedAtMs ?: ts,
                     isError = if (status == "failed" || status == "error") true else existing?.isError,
                     liveDiff = existing?.liveDiff,
-                    label = label?.trim()?.takeIf { it.isNotEmpty() } ?: existing?.label,
+                    label = meta?.trim()?.takeIf { it.isNotEmpty() } ?: existing?.label,
+                    title = title?.trim()?.takeIf { it.isNotEmpty() } ?: existing?.title,
                     done = finished,
                   ),
                 )
@@ -7400,7 +7448,7 @@ class ChatController internal constructor(
     if (payload["state"].asStringOrNull() != "final") return
     val normalizedRunId = runId?.trim()?.takeIf(String::isNotEmpty) ?: return
     val verifiedOwner = owner?.takeIf { it.routingVerified } ?: return
-    val text = parseAssistantDeltaText(payload)?.trim()?.takeIf(String::isNotEmpty) ?: return
+    val text = parseAssistantMessageText(payload)?.trim()?.takeIf(String::isNotEmpty) ?: return
     runCatching { onAssistantReplyFinalized(verifiedOwner, normalizedRunId, text) }
     val phaseRunId = runActivityPhaseRunId
     if (_runActivityPhase.value.let { it != null && it != ChatRunActivityPhase.Completed } &&
@@ -7410,24 +7458,24 @@ class ChatController internal constructor(
     }
   }
 
-  private fun parseAssistantDeltaText(payload: JsonObject): String? {
+  private fun parseAssistantMessageText(payload: JsonObject): String? {
     val message = payload["message"].asObjectOrNull() ?: return null
     if (message["role"].asStringOrNull() != "assistant") return null
     val directText = message["content"].asStringOrNull()?.takeIf(String::isNotEmpty)
     if (directText != null) return directText
     val content = message["content"].asArrayOrNull() ?: return null
-    for (item in content) {
-      val obj = item.asObjectOrNull() ?: continue
-      if (obj["type"].asStringOrNull() != "text") continue
-      val text = obj["text"].asStringOrNull()
-      if (!text.isNullOrEmpty()) {
-        return text
+    // A final display message can carry several text parts around tool blocks.
+    // Returning only the first part truncated the live answer to its preamble.
+    val parts =
+      content.mapNotNull { item ->
+        val obj = item.asObjectOrNull() ?: return@mapNotNull null
+        if (obj["type"].asStringOrNull() != "text") return@mapNotNull null
+        obj["text"].asStringOrNull()?.takeIf(String::isNotEmpty)
       }
-    }
-    return null
+    return parts.takeIf { it.isNotEmpty() }?.joinToString("\n")
   }
 
-  /** Mirrors [parseAssistantDeltaText] for reasoning blocks inside chat deltas. */
+  /** Mirrors [parseAssistantMessageText] for reasoning blocks inside chat deltas. */
   private fun parseAssistantDeltaThinking(payload: JsonObject): String? {
     val message = payload["message"].asObjectOrNull() ?: return null
     if (message["role"].asStringOrNull() != "assistant") return null
@@ -7462,6 +7510,36 @@ class ChatController internal constructor(
     synchronized(gatewayScopeApplyLock) {
       pendingToolCallsById.clear()
       publishPendingToolCalls()
+    }
+  }
+
+  /** Remembers a gateway title so the transcript row replacing the live row keeps it. */
+  private fun rememberLiveToolTitle(
+    sessionKey: String?,
+    toolCallId: String,
+    title: String?,
+  ) {
+    val key = sessionKey?.trim()?.takeIf { it.isNotEmpty() } ?: return
+    val value = title?.trim()?.takeIf { it.isNotEmpty() } ?: return
+    if (toolCallId.isEmpty()) return
+    synchronized(liveToolTitlesBySession) {
+      val titles = liveToolTitlesBySession.getOrPut(key) { mutableMapOf() }
+      // Re-insert so the newest title also counts as the most recently used one.
+      titles.remove(toolCallId)
+      titles[toolCallId] = value
+      while (titles.size > MAX_LIVE_TOOL_TITLES_PER_SESSION) {
+        titles.remove(titles.keys.first())
+      }
+      while (liveToolTitlesBySession.size > MAX_LIVE_TOOL_TITLE_SESSIONS) {
+        liveToolTitlesBySession.remove(liveToolTitlesBySession.keys.first())
+      }
+    }
+  }
+
+  private fun liveToolTitles(sessionKey: String?): Map<String, String> {
+    val key = sessionKey?.trim()?.takeIf { it.isNotEmpty() } ?: return emptyMap()
+    return synchronized(liveToolTitlesBySession) {
+      liveToolTitlesBySession[key]?.toMap().orEmpty()
     }
   }
 
@@ -7571,7 +7649,14 @@ class ChatController internal constructor(
     text: String,
   ) {
     synchronized(gatewayScopeApplyLock) {
-      streamingAssistantOwner = liveRunOwner(runId)
+      val owner = liveRunOwner(runId)
+      val previous = _streamingAssistantText.value
+      // A new owner or a rewritten buffer invalidates every phase snapshot. A
+      // prefix-growing snapshot keeps them, which is the normal stream case.
+      if (owner != streamingAssistantOwner || (previous != null && !text.startsWith(previous))) {
+        clearLivePhaseCheckpoints()
+      }
+      streamingAssistantOwner = owner
       _streamingAssistantText.value = text
       setRunActivityPhase(ChatRunActivityPhase.Generating, runId)
     }
@@ -7587,11 +7672,40 @@ class ChatController internal constructor(
     delta: String,
   ) {
     synchronized(gatewayScopeApplyLock) {
-      streamingAssistantOwner = liveRunOwner(runId)
+      val owner = liveRunOwner(runId)
+      if (owner != streamingAssistantOwner) clearLivePhaseCheckpoints()
+      streamingAssistantOwner = owner
       val next = _streamingAssistantText.value.orEmpty() + delta
       _streamingAssistantText.value = next
       setRunActivityPhase(ChatRunActivityPhase.Generating, runId)
     }
+  }
+
+  /**
+   * Splits the live transcript at a tool boundary. Called on tool start while
+   * the assistant/thinking buffers still hold only the preceding prose.
+   */
+  private fun recordLivePhaseCheckpoint(
+    owner: ChatRunOwner,
+    toolCallId: String,
+    startedAtMs: Long,
+  ) {
+    if (livePhaseOwner != null && livePhaseOwner != owner) clearLivePhaseCheckpoints()
+    if (_livePhaseCheckpoints.value.any { it.toolCallId == toolCallId }) return
+    livePhaseOwner = owner
+    _livePhaseCheckpoints.value =
+      _livePhaseCheckpoints.value +
+        ChatLivePhaseCheckpoint(
+          toolCallId = toolCallId,
+          textSnapshot = _streamingAssistantText.value.orEmpty(),
+          thinkingSnapshot = _streamingThinkingText.value.orEmpty(),
+          startedAtMs = startedAtMs,
+        )
+  }
+
+  private fun clearLivePhaseCheckpoints() {
+    if (_livePhaseCheckpoints.value.isNotEmpty()) _livePhaseCheckpoints.value = emptyList()
+    livePhaseOwner = null
   }
 
   /**
@@ -7624,13 +7738,18 @@ class ChatController internal constructor(
     synchronized(gatewayScopeApplyLock) {
       val retiringOwner = if (runId != null && owner != null) ChatRunOwner(owner, runId) else null
       if (runId != null && retiringOwner == null) return
-      if (runId == null || streamingAssistantOwner == retiringOwner) {
+      val clearedAssistant = runId == null || streamingAssistantOwner == retiringOwner
+      val clearedThinking = runId == null || streamingThinkingOwner == retiringOwner
+      if (clearedAssistant) {
         streamingAssistantOwner = null
         _streamingAssistantText.value = null
       }
-      if (runId == null || streamingThinkingOwner == retiringOwner) {
+      if (clearedThinking) {
         streamingThinkingOwner = null
         _streamingThinkingText.value = null
+      }
+      if (clearedAssistant || clearedThinking || livePhaseOwner == retiringOwner) {
+        clearLivePhaseCheckpoints()
       }
       if (runId == null) {
         pendingToolCallsById.clear()
@@ -7879,6 +7998,7 @@ class ChatController internal constructor(
         unresolvedRepliesByRunId.clear()
         timedOutRunIds.clear()
         terminalWithoutReplyRunIds.clear()
+        terminalHistoryPendingRunIds.clear()
         unknownOutcomeRunIds.clear()
       }
       synchronized(pendingRuns) {
@@ -8063,6 +8183,10 @@ class ChatController internal constructor(
         unresolvedRunIds.forEach(::removeOptimisticMessage)
         unresolvedRunIds.forEach(unresolvedRepliesByRunId::remove)
         unresolvedRunIds.forEach(terminalWithoutReplyRunIds::remove)
+        // No persisted owner will arrive; release the live row this reconcile kept.
+        unresolvedRunIds.forEach { runId ->
+          if (terminalHistoryPendingRunIds.remove(runId)) clearLiveRunUi(runId)
+        }
         updateLocalizedErrorText(nativeText("Timed out confirming the sent message; refresh to check delivery."))
         // Ownership expired without proof; keep the journaled copies visible for manual review.
         for (unresolvedRunId in unresolvedRunIds) {
@@ -8877,8 +9001,6 @@ private enum class ChatMetadataLoadState {
   Loaded,
 }
 
-// Group mutations enumerate whole stores; far past any realistic session count.
-private const val GROUP_MEMBER_FETCH_LIMIT = 10_000
 private const val FULL_MESSAGE_TEXT_MAX_CHARS = 1_000_000
 
 internal fun isCurrentHistoryLoad(
@@ -9043,7 +9165,21 @@ private fun toolPresentationArguments(args: JsonObject?): JsonObject? {
   if (args == null) return null
   val projected =
     buildJsonObject {
-      listOf("command", "cmd", "path", "filePath", "query", "url", "target", "description", "markdown").forEach { key ->
+      listOf(
+          "command",
+          "cmd",
+          "path",
+          "filePath",
+          "query",
+          "url",
+          "target",
+          "description",
+          "markdown",
+          "action",
+          "name",
+          "proposal_id",
+        )
+        .forEach { key ->
         boundedToolText(args[key].asStringOrNull(), CHAT_TOOL_DETAIL_MAX_CHARS)?.let { put(key, JsonPrimitive(it)) }
       }
       (args["plan"] as? JsonArray)?.let { plan ->
@@ -9066,6 +9202,56 @@ private fun toolPresentationArguments(args: JsonObject?): JsonObject? {
       }
     }
   return projected.takeIf { it.isNotEmpty() }
+}
+
+/**
+ * Gathers the tool titles already known for a transcript, keyed by tool call id. Feeding this
+ * back into [carryToolTitles] keeps rows from losing their title when a history refresh
+ * rebuilds them without one (history carries the command, not the gateway title).
+ */
+internal fun collectToolTitles(messages: List<ChatMessage>): Map<String, String> {
+  if (messages.isEmpty()) return emptyMap()
+  val titles = mutableMapOf<String, String>()
+  for (message in messages) {
+    for (part in message.content) {
+      val tool = part.toolActivity ?: continue
+      val toolCallId = tool.toolCallId?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+      val title = tool.title?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+      titles[toolCallId] = title
+    }
+  }
+  return titles
+}
+
+/**
+ * Backfills gateway-supplied tool titles onto transcript rows. Gateways only put the
+ * human title on the live item stream, so the history row that replaces the live row
+ * would otherwise fall back to the raw command. Returns [messages] unchanged when
+ * nothing matches so callers keep referential equality for recomposition.
+ */
+internal fun carryToolTitles(
+  messages: List<ChatMessage>,
+  titles: Map<String, String>?,
+): List<ChatMessage> {
+  if (messages.isEmpty() || titles.isNullOrEmpty()) return messages
+  var changed = false
+  val next =
+    messages.map outer@{ message ->
+      var messageChanged = false
+      val content =
+        message.content.map inner@{ part ->
+          val tool = part.toolActivity ?: return@inner part
+          val toolCallId = tool.toolCallId ?: return@inner part
+          if (!tool.title.isNullOrBlank()) return@inner part
+          val title = titles[toolCallId] ?: return@inner part
+          messageChanged = true
+          part.copy(toolActivity = tool.copy(title = title))
+        }
+      if (!messageChanged) return@outer message
+      changed = true
+      message.copy(content = content)
+    }
+  return if (changed) next else messages
 }
 
 private fun parseToolActivityContent(
@@ -9096,6 +9282,7 @@ private fun parseToolActivityContent(
         result = result,
         isError = obj["isError"] == JsonPrimitive(true),
         arguments = toolPresentationArguments(args),
+        title = obj["title"].asStringOrNull()?.trim()?.takeIf(String::isNotEmpty),
       ),
   )
 }
@@ -9104,7 +9291,7 @@ private fun parseTopLevelToolResult(obj: JsonObject): ChatMessageContent? {
   val synthetic =
     buildMap<String, JsonElement> {
       put("type", JsonPrimitive("toolResult"))
-      listOf("toolCallId", "tool_call_id", "toolUseId", "tool_use_id", "callId", "name", "toolName", "tool_name", "isError", "content", "result", "text").forEach { key ->
+      listOf("toolCallId", "tool_call_id", "toolUseId", "tool_use_id", "callId", "name", "toolName", "tool_name", "title", "isError", "content", "result", "text").forEach { key ->
         obj[key]?.let { put(key, it) }
       }
     }

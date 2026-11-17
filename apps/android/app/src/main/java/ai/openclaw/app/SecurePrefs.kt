@@ -60,6 +60,13 @@ data class GatewayCredentials(
     )
 }
 
+/** Last successfully loaded agents.list snapshot for one gateway. */
+@Serializable
+internal data class CachedAgentCatalog(
+  val defaultAgentId: String? = null,
+  val agents: List<GatewayAgentSummary> = emptyList(),
+)
+
 internal val defaultSidebarPageOrder = listOf("settings", "work", "home", "skills", "threads")
 internal val defaultSidebarVisiblePages = defaultSidebarPageOrder
 
@@ -136,6 +143,8 @@ class SecurePrefs(
     private const val sessionCustomGroupsKey = "sessions.customGroups"
     private const val sessionPinnedKeysPrefix = "sessions.pinned."
     private const val gatewayProfileCachePrefix = "gateway.profile."
+    private const val agentCatalogCachePrefix = "agentCatalog."
+    private const val cachedAgentAvatarMaxChars = 2 * 1024 * 1024
     private const val sidebarPageOrderKey = "sidebar.pageOrder"
     private const val sidebarVisiblePagesKey = "sidebar.visiblePages"
 
@@ -1363,6 +1372,43 @@ class SecurePrefs(
   private fun gatewayProfileCacheKey(gatewayId: String): String? {
     val gateway = gatewayId.trim().takeIf(String::isNotEmpty) ?: return null
     return "$gatewayProfileCachePrefix$gateway"
+  }
+
+  internal fun loadCachedAgentCatalog(stableId: String?): CachedAgentCatalog? {
+    val key = agentCatalogCacheKey(stableId) ?: return null
+    val raw = plainPrefs.getString(key, null)?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    return runCatching { json.decodeFromString<CachedAgentCatalog>(raw) }.getOrNull()
+  }
+
+  internal fun saveCachedAgentCatalog(
+    stableId: String?,
+    defaultAgentId: String?,
+    agents: List<GatewayAgentSummary>,
+  ) {
+    val key = agentCatalogCacheKey(stableId) ?: return
+    val sanitized =
+      agents.distinctBy(GatewayAgentSummary::id).map { agent ->
+        // Oversized inline avatars are dropped from the on-disk snapshot only; the
+        // live catalog keeps them and the picker still renders the current run.
+        val avatar = agent.avatar?.takeIf { it.length <= cachedAgentAvatarMaxChars }
+        val avatarUrl = agent.avatarUrl?.takeIf { it.length <= cachedAgentAvatarMaxChars }
+        if (avatar === agent.avatar && avatarUrl === agent.avatarUrl) {
+          agent
+        } else {
+          agent.copy(avatar = avatar, avatarUrl = avatarUrl)
+        }
+      }
+    val payload =
+      CachedAgentCatalog(
+        defaultAgentId = defaultAgentId?.trim()?.takeIf(String::isNotEmpty),
+        agents = sanitized,
+      )
+    plainPrefs.edit { putString(key, json.encodeToString(payload)) }
+  }
+
+  private fun agentCatalogCacheKey(stableId: String?): String? {
+    val gateway = stableId?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    return "$agentCatalogCachePrefix$gateway"
   }
 
   fun setSidebarPageOrder(pageIds: List<String>) {

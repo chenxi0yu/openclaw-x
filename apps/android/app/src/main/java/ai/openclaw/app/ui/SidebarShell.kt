@@ -1,7 +1,6 @@
 package ai.openclaw.app.ui
 
 import ai.openclaw.app.ui.design.ClawGlassHost
-import ai.openclaw.app.ui.design.ClawMorphMenuOverlay
 import ai.openclaw.app.ui.design.ClawTheme
 import ai.openclaw.app.ui.design.LocalClawMorphMenuHost
 import ai.openclaw.app.ui.design.rememberClawBackdrop
@@ -188,6 +187,7 @@ private fun SidebarMorphSurface(
   content: @Composable () -> Unit,
 ) {
   val morph = rememberClawMorphMenuState()
+  val drill = remember(morph) { SidebarDrillState(morph) }
   val backdrop = rememberClawBackdrop()
   Box(modifier = modifier) {
     Box(
@@ -198,13 +198,17 @@ private fun SidebarMorphSurface(
           .background(ClawTheme.colors.canvas),
     ) {
       ClawGlassHost(modifier = Modifier.fillMaxSize()) {
-        CompositionLocalProvider(LocalClawMorphMenuHost provides morph, content = content)
+        CompositionLocalProvider(
+          LocalClawMorphMenuHost provides morph,
+          LocalSidebarDrillHost provides drill,
+          content = content,
+        )
       }
     }
-    ClawMorphMenuOverlay(
-      state = morph,
-      onDismissRequest = morph::dismiss,
+    SidebarDrillOverlay(
+      state = drill,
       backdrop = backdrop,
+      hazeState = null,
     )
   }
 }

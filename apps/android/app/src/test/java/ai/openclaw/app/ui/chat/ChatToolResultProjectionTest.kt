@@ -139,14 +139,12 @@ class ChatToolResultProjectionTest {
       assertEquals(2, groups.size)
       assertEquals(listOf(output, call), groups.flatMap { it.tools })
       assertEquals(forwarded.content.isNotEmpty(), built.items.filterIsInstance<ChatTimelineItem.Message>().any { it.message.id == "forwarded" })
-      val collapsed = built.withCompletedWorkGroups(history, false, emptySet(), "agent:main:dashboard:test")
-      assertEquals(
-        listOf("new-final", "previous-final"),
-        collapsed.items
+      val visibleFinals =
+        built.items
           .filterIsInstance<ChatTimelineItem.Message>()
           .map { it.message.id }
-          .filterNot { it == "forwarded" },
-      )
+          .filter { it == "new-final" || it == "previous-final" }
+      assertEquals(listOf("new-final", "previous-final"), visibleFinals)
     }
   }
 

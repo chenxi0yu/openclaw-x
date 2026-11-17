@@ -67,6 +67,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -83,6 +84,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.vector.ImageVector
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.AddFolder as MiuixAddFolder
+import top.yukonga.miuix.kmp.icon.extended.Sort as MiuixSort
 import top.yukonga.miuix.kmp.icon.extended.Add as MiuixAdd
 import top.yukonga.miuix.kmp.icon.extended.All as MiuixAll
 import top.yukonga.miuix.kmp.icon.extended.ChevronForward as MiuixChevronForward
@@ -492,6 +495,10 @@ internal fun OpenClawSidebar(
   // state is which session is waiting on a rename or delete confirmation.
   var renameSessionTarget by remember { mutableStateOf<ChatSessionEntry?>(null) }
   var deleteSessionTarget by remember { mutableStateOf<ChatSessionEntry?>(null) }
+  var newGroupSessionTarget by remember { mutableStateOf<ChatSessionEntry?>(null) }
+  var renameGroupTarget by remember { mutableStateOf<String?>(null) }
+  var deleteGroupTarget by remember { mutableStateOf<String?>(null) }
+  var collapsedGroupNames by rememberSaveable { mutableStateOf(emptyList<String>()) }
   var collapsedCatalogHostIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
   var collapsedCatalogWorkspaceIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
   val catalogSections = sidebarCatalogSections(catalogState.catalogs, expandedCatalogIds)
@@ -527,6 +534,28 @@ internal fun OpenClawSidebar(
       viewModel.patchChatSession(key = key, ownerAgentId = ownerAgentId, unread = unread)
     }
   }
+  // null clears the category, which returns the thread to Ungrouped.
+  val setSessionGroup: (ChatSessionEntry, String?) -> Unit = { session, group ->
+    scope.launch {
+      viewModel.patchChatSession(
+        key = session.key,
+        ownerAgentId = session.ownerAgentId,
+        category = group,
+        clearCategory = group == null,
+      )
+    }
+  }
+  // Empty groups stay listed only while the local record remembers them, so the
+  // picker shows stored names plus every category currently in use. "Ungrouped"
+  // is not a stored group — it is always offered as the last destination.
+  val knownGroupNames =
+    remember(storedGroups, sessions) {
+      val ungrouped = nativeString("Ungrouped")
+      (storedGroups + sessions.mapNotNull { it.category?.trim()?.takeIf(String::isNotEmpty) })
+        .filterNot { it.equals(ungrouped, ignoreCase = true) }
+        .distinctBy { it.lowercase() }
+        .sortedBy { it.lowercase() }
+    }
   LaunchedEffect(
     connection.isConnected,
     selectedAgentId,
@@ -702,8 +731,11 @@ internal fun OpenClawSidebar(
                         sidebarSessionMenu(
                           session = session,
                           canMutate = canMutateSessions,
+                          groups = knownGroupNames,
                           onSetPinned = { pinned -> setSessionPinned(session.key, session.ownerAgentId, pinned) },
                           onSetUnread = { unread -> setSessionUnread(session.key, session.ownerAgentId, unread) },
+                          onAssignGroup = { group -> setSessionGroup(session, group) },
+                          onNewGroup = { newGroupSessionTarget = session },
                           onRename = { renameSessionTarget = session },
                           onDelete = { deleteSessionTarget = session },
                         ),
@@ -905,8 +937,11 @@ internal fun OpenClawSidebar(
                         onSelectSession = onSelectCatalogSession,
                         onLoadMore = viewModel::loadMoreSessionCatalog,
                         canMutateSessions = canMutateSessions,
+                        groups = knownGroupNames,
                         onSetPinned = setSessionPinned,
                         onSetUnread = setSessionUnread,
+                        onAssignGroup = setSessionGroup,
+                        onNewGroup = { session -> newGroupSessionTarget = session },
                         onRename = { session -> renameSessionTarget = session },
                         onDelete = { session -> deleteSessionTarget = session },
                       )
@@ -935,24 +970,48 @@ internal fun OpenClawSidebar(
             )
           } else {
             recentSections.forEach { section ->
-              section.title?.let { title -> SidebarSectionTitle(title, palette, Modifier.padding(start = 24.dp)) }
-              Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                section.entries.forEach { session ->
-                  SidebarSessionRow(
-                    session = session,
-                    selected = session.key == activeSessionKey,
-                    palette = palette,
-                    onClick = { onSelectSession(session) },
-                    menuContent =
-                      sidebarSessionMenu(
-                        session = session,
-                        canMutate = canMutateSessions,
-                        onSetPinned = { pinned -> setSessionPinned(session.key, session.ownerAgentId, pinned) },
-                        onSetUnread = { unread -> setSessionUnread(session.key, session.ownerAgentId, unread) },
-                        onRename = { renameSessionTarget = session },
-                        onDelete = { deleteSessionTarget = session },
-                      ),
-                  )
+              val sectionTitle = section.title
+              val sectionExpanded = sectionTitle == null || sectionTitle !in collapsedGroupNames
+              sectionTitle?.let { title ->
+                SidebarGroupHeader(
+                  title = title,
+                  canManage = canMutateSessions && section.isCategory,
+                  expanded = sectionExpanded,
+                  palette = palette,
+                  onToggle = {
+                    collapsedGroupNames =
+                      if (title in collapsedGroupNames) {
+                        collapsedGroupNames - title
+                      } else {
+                        collapsedGroupNames + title
+                      }
+                  },
+                  onRename = { renameGroupTarget = title },
+                  onDelete = { deleteGroupTarget = title },
+                )
+              }
+              if (sectionExpanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                  section.entries.forEach { session ->
+                    SidebarSessionRow(
+                      session = session,
+                      selected = session.key == activeSessionKey,
+                      palette = palette,
+                      onClick = { onSelectSession(session) },
+                      menuContent =
+                        sidebarSessionMenu(
+                          session = session,
+                          canMutate = canMutateSessions,
+                          groups = knownGroupNames,
+                          onSetPinned = { pinned -> setSessionPinned(session.key, session.ownerAgentId, pinned) },
+                          onSetUnread = { unread -> setSessionUnread(session.key, session.ownerAgentId, unread) },
+                          onAssignGroup = { group -> setSessionGroup(session, group) },
+                          onNewGroup = { newGroupSessionTarget = session },
+                          onRename = { renameSessionTarget = session },
+                          onDelete = { deleteSessionTarget = session },
+                        ),
+                    )
+                  }
                 }
               }
             }
@@ -1049,6 +1108,81 @@ internal fun OpenClawSidebar(
         },
       )
     }
+    newGroupSessionTarget?.let { session ->
+      SessionTextDialog(
+        title = "新建分组",
+        stateKey = "sidebar-group-new:${session.key}",
+        initialValue = "",
+        confirmLabel = nativeString("Create"),
+        allowEmpty = false,
+        onDismiss = { newGroupSessionTarget = null },
+        onConfirm = { value ->
+          newGroupSessionTarget = null
+          val group = value.trim()
+          if (group.isNotEmpty()) {
+            // Remember the name so the group survives locally even if the patch
+            // later empties it, then move this thread into it.
+            viewModel.addChatSessionGroup(group)
+            scope.launch {
+              viewModel.patchChatSession(
+                key = session.key,
+                ownerAgentId = session.ownerAgentId,
+                category = group,
+              )
+            }
+          }
+        },
+      )
+    }
+    renameGroupTarget?.let { group ->
+      SessionTextDialog(
+        title = nativeString("Rename group"),
+        stateKey = "sidebar-group-rename:$group",
+        initialValue = group,
+        confirmLabel = nativeString("Rename"),
+        allowEmpty = false,
+        onDismiss = { renameGroupTarget = null },
+        onConfirm = { value ->
+          renameGroupTarget = null
+          val next = value.trim()
+          if (next.isNotEmpty() && next != group) {
+            // Keep the collapsed state attached to the renamed group.
+            collapsedGroupNames = collapsedGroupNames.map { if (it == group) next else it }
+            scope.launch { viewModel.renameChatSessionGroup(from = group, to = next) }
+          }
+        },
+      )
+    }
+    deleteGroupTarget?.let { group ->
+      AlertDialog(
+        onDismissRequest = { deleteGroupTarget = null },
+        containerColor = ClawTheme.colors.surfaceRaised,
+        title = { Text(nativeString("Delete group?"), style = ClawTheme.type.section, color = ClawTheme.colors.text) },
+        text = {
+          Text(
+            nativeString("Threads in \"\$group\" are kept and move back to Ungrouped.", group),
+            style = ClawTheme.type.body,
+            color = ClawTheme.colors.textMuted,
+          )
+        },
+        confirmButton = {
+          TextButton(
+            onClick = {
+              deleteGroupTarget = null
+              collapsedGroupNames = collapsedGroupNames - group
+              scope.launch { viewModel.deleteChatSessionGroup(group) }
+            },
+          ) {
+            Text(nativeString("Delete"), color = ClawTheme.colors.danger)
+          }
+        },
+        dismissButton = {
+          TextButton(onClick = { deleteGroupTarget = null }) {
+            Text(nativeString("Cancel"))
+          }
+        },
+      )
+    }
   }
 }
 
@@ -1060,8 +1194,11 @@ internal fun OpenClawSidebar(
 private fun sidebarSessionMenu(
   session: ChatSessionEntry,
   canMutate: Boolean,
+  groups: List<String>,
   onSetPinned: (Boolean) -> Unit,
   onSetUnread: (Boolean) -> Unit,
+  onAssignGroup: (String?) -> Unit,
+  onNewGroup: () -> Unit,
   onRename: () -> Unit,
   onDelete: () -> Unit,
 ): (@Composable ColumnScope.() -> Unit)? {
@@ -1072,8 +1209,14 @@ private fun sidebarSessionMenu(
   val unreadLabel = nativeString(if (unread) "Mark as read" else "Mark as unread")
   val renameLabel = nativeString("Rename")
   val deleteLabel = nativeString("Delete")
-  // Four compact actions only; the long-pressed row already tells the user
-  // which session they are acting on, so the card carries no title of its own.
+  val drill = LocalSidebarDrillHost.current
+  val currentGroup = session.category?.trim()?.takeIf(String::isNotEmpty)
+  // The drill body outlives this composition (it is stored on the menu state), so
+  // it must read the live group list: a group created from inside the card has to
+  // show up in that same card without closing it.
+  val liveGroups by rememberUpdatedState(groups)
+  // The long-pressed row already tells the user which session they are acting
+  // on, so the card carries no title of its own.
   return {
     ClawGlassMenuItem(
       label = pinLabel,
@@ -1087,6 +1230,70 @@ private fun sidebarSessionMenu(
       selected = unread,
       onClick = { onSetUnread(!unread) },
     )
+    if (drill != null) {
+      // Drills into the group picker on the same surface; the primary card must
+      // stay alive for the nested card to grow out of this row.
+      ClawGlassMenuItem(
+        label = "添加到分组",
+        icon = MiuixIcons.Medium.MiuixSort,
+        // Mirrors the nested header: current group on the right, ⇅ as the
+        // "expands" affordance, so both cards read as one control.
+        trailing = currentGroup ?: nativeString("Ungrouped"),
+        trailingIcon = MiuixIcons.Medium.MiuixSort,
+        keepOpen = true,
+        // Publishes this row's position so the nested card can continue the same
+        // line instead of guessing where it was tapped.
+        modifier =
+          Modifier.sidebarDrillRowBounds(
+            host = { drill.morph.hostCoords },
+            onBounds = { drill.rowBounds["session-group"] = it },
+          ),
+        onClick = {
+          drill.drillInto(
+            key = "session-group",
+            header =
+              SidebarDrillHeader(
+                icon = MiuixIcons.Medium.MiuixSort,
+                title = "添加到分组",
+                value = currentGroup ?: nativeString("Ungrouped"),
+              ),
+          ) {
+            val ungrouped = nativeString("Ungrouped")
+            // Ungrouped leads: it is the default state, and every thread can
+            // always be taken back out of its group.
+            SidebarDrillOptionRow(
+              label = ungrouped,
+              selected = currentGroup == null,
+              onClick = {
+                drill.closeAll()
+                onAssignGroup(null)
+              },
+            )
+            liveGroups
+              .filterNot { it.equals(ungrouped, ignoreCase = true) }
+              .forEach { group ->
+                SidebarDrillOptionRow(
+                  label = group,
+                  selected = group.equals(currentGroup, ignoreCase = true),
+                  onClick = {
+                    drill.closeAll()
+                    onAssignGroup(group)
+                  },
+                )
+              }
+            SidebarDrillDivider()
+            SidebarDrillActionRow(
+              icon = MiuixIcons.Medium.MiuixAddFolder,
+              label = "新建分组",
+              clickable = true,
+              // Stays open: the new group appears in this very list so it can be
+              // picked right away, instead of collapsing back to the session row.
+              onClick = onNewGroup,
+            )
+          }
+        },
+      )
+    }
     ClawGlassMenuItem(label = renameLabel, icon = MiuixIcons.Medium.MiuixRename, onClick = onRename)
     ClawGlassMenuItem(label = deleteLabel, icon = MiuixIcons.Medium.MiuixDelete, danger = true, onClick = onDelete)
   }
@@ -1257,8 +1464,11 @@ private fun SidebarSessionCatalog(
   onSelectSession: (SessionCatalogEntry) -> Unit,
   onLoadMore: (String) -> Unit,
   canMutateSessions: Boolean,
+  groups: List<String>,
   onSetPinned: (String, String?, Boolean) -> Unit,
   onSetUnread: (String, String?, Boolean) -> Unit,
+  onAssignGroup: (ChatSessionEntry, String?) -> Unit,
+  onNewGroup: (ChatSessionEntry) -> Unit,
   onRename: (ChatSessionEntry) -> Unit,
   onDelete: (ChatSessionEntry) -> Unit,
 ) {
@@ -1387,8 +1597,11 @@ private fun SidebarSessionCatalog(
                   palette = palette,
                   onClick = { onSelectSession(session) },
                   canMutateSessions = canMutateSessions,
+                  groups = groups,
                   onSetPinned = onSetPinned,
                   onSetUnread = onSetUnread,
+                  onAssignGroup = onAssignGroup,
+                  onNewGroup = onNewGroup,
                   onRename = onRename,
                   onDelete = onDelete,
                 )
@@ -1433,8 +1646,11 @@ private fun SidebarCatalogSessionRow(
   palette: SidebarPalette,
   onClick: () -> Unit,
   canMutateSessions: Boolean,
+  groups: List<String>,
   onSetPinned: (String, String?, Boolean) -> Unit,
   onSetUnread: (String, String?, Boolean) -> Unit,
+  onAssignGroup: (ChatSessionEntry, String?) -> Unit,
+  onNewGroup: (ChatSessionEntry) -> Unit,
   onRename: (ChatSessionEntry) -> Unit,
   onDelete: (ChatSessionEntry) -> Unit,
 ) {
@@ -1464,8 +1680,11 @@ private fun SidebarCatalogSessionRow(
       sidebarSessionMenu(
         session = live,
         canMutate = true,
+        groups = groups,
         onSetPinned = { next -> onSetPinned(live.key, live.ownerAgentId, next) },
         onSetUnread = { next -> onSetUnread(live.key, live.ownerAgentId, next) },
+        onAssignGroup = { group -> onAssignGroup(live, group) },
+        onNewGroup = { onNewGroup(live) },
         onRename = { onRename(live) },
         onDelete = { onDelete(live) },
       )

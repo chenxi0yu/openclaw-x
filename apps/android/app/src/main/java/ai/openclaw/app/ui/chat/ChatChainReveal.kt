@@ -77,6 +77,18 @@ internal fun ChatChainReveal(
 }
 
 /**
+ * Keys owned by the live projection rather than durable history. The prefixes
+ * mirror [chatTimelineItemKey]: persisted thinking/tools have different owners.
+ */
+private fun isLiveProcessKey(key: String): Boolean =
+  key == "stream" ||
+    key.startsWith("stream:live:") ||
+    key == "tools" ||
+    key.startsWith("tools:") ||
+    key.startsWith("thinking:live-") ||
+    key == "subagent-activity"
+
+/**
  * Decides which rows deserve the reveal animation: only rows whose key shows up
  * for the first time, and only for small increments. Bulk changes (history load,
  * session switch) must not turn the whole transcript into a fireworks show.
@@ -89,6 +101,7 @@ internal fun ChatChainReveal(
 internal class ChatChainRevealTracker {
   private val seen = HashSet<String>()
   private val pending = HashSet<String>()
+  private var previousKeys: Set<String> = emptySet()
   var primed = false
     private set
 
@@ -97,8 +110,14 @@ internal class ChatChainRevealTracker {
   /** Seeds the rows allowed to animate this round; bulk changes seed nothing. */
   fun animateKeys(keys: Collection<String>): Set<String> {
     pending.clear()
+    val current = keys.toSet()
+    // Detect the handoff from the keys themselves, not run state: the terminal
+    // event and the history snapshot may arrive on different frames. Re-keyed
+    // chain rows were already watched, so they must swap without a second reveal.
+    val handoff = previousKeys.any(::isLiveProcessKey) && current.none(::isLiveProcessKey)
+    previousKeys = current
     val fresh = keys.filter(::isFresh)
-    if (primed && fresh.size in 1..CHAIN_REVEAL_MAX_BATCH) pending.addAll(fresh)
+    if (primed && !handoff && fresh.size in 1..CHAIN_REVEAL_MAX_BATCH) pending.addAll(fresh)
     return pending.toSet()
   }
 

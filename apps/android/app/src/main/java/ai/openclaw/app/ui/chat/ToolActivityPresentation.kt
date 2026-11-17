@@ -84,31 +84,49 @@ internal fun toolVerbDone(kind: CompletedToolKind): String =
     CompletedToolKind.Other -> "已完成"
   }
 
+/** File-backed tools show just the file name; the sheet keeps the full path. */
+internal fun fileDisplayName(path: String): String {
+  val name = path.substringAfterLast('/').substringAfterLast('\\').trim()
+  return name.ifEmpty { path }
+}
+
+internal fun isFileToolKind(kind: CompletedToolKind): Boolean =
+  kind == CompletedToolKind.Read || kind == CompletedToolKind.Edit || kind == CompletedToolKind.Write
+
 /** Short object name shown after the verb, so a row reads 已写入 src/Main.kt. */
 internal fun toolTargetLabel(
   args: JsonObject?,
   name: String,
 ): String? {
   val kind = completedToolKind(name)
-  if (kind == CompletedToolKind.Command) {
-    return args.string("command")
-      ?: args.string("cmd")
-      ?: args.string("description")
+  val raw =
+    when (kind) {
+      CompletedToolKind.Command ->
+        args.string("command")
+          ?: args.string("cmd")
+          ?: args.string("description")
+
+      CompletedToolKind.WebSearch ->
+        args.string("query")
+          ?: args.string("q")
+          ?: args.string("search")
+          ?: args.string("keywords")
+
+      else ->
+        args.string("path")
+          ?: args.string("filePath")
+          ?: args.string("file")
+          ?: args.string("fileName")
+          ?: args.string("query")
+          ?: args.string("url")
+          ?: args.string("target")
+          ?: args.string("description")
+    }
+  return if (isFileToolKind(kind)) {
+    raw?.let(::fileDisplayName)
+  } else {
+    raw
   }
-  if (kind == CompletedToolKind.WebSearch) {
-    return args.string("query")
-      ?: args.string("q")
-      ?: args.string("search")
-      ?: args.string("keywords")
-  }
-  return args.string("path")
-    ?: args.string("filePath")
-    ?: args.string("file")
-    ?: args.string("fileName")
-    ?: args.string("query")
-    ?: args.string("url")
-    ?: args.string("target")
-    ?: args.string("description")
 }
 
 internal fun completedToolDisplayName(name: String): String =

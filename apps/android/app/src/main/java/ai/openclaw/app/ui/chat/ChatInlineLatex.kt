@@ -26,7 +26,12 @@ internal fun splitInlineLatex(
   text: String,
   isStreaming: Boolean = false,
 ): List<InlineLatexSegment> {
-  if (!containsInlineMath(text)) return listOf(InlineLatexSegment.Text(text, 0, text.length))
+  if (!containsInlineMath(text)) {
+    // Models often write a formula without any `$` delimiters (`(a^x)'=a^x\ln a`,
+    // `x^x=e^{x\ln x}`). Recover only high-confidence bare TeX so ordinary prose
+    // such as `C:\Users` or `a_b` stays literal.
+    return splitBareLatex(text) ?: listOf(InlineLatexSegment.Text(text, 0, text.length))
+  }
 
   val segments = mutableListOf<InlineLatexSegment>()
   var literalStart = 0
@@ -69,7 +74,9 @@ internal fun splitInlineLatex(
  * literal text, not math.
  */
 internal fun protectChatInlineMath(source: String): String {
-  if (!containsInlineMath(source)) return source
+  // Bare TeX also needs its backslashes protected from CommonMark escapes, so the
+  // gate cannot require a `$` delimiter here either.
+  if (!source.contains('\\') && !containsInlineMath(source)) return source
   val lines = source.split('\n')
   val protected = ArrayList<String>(lines.size)
   var fenceChar: Char? = null
@@ -210,12 +217,133 @@ private fun findDoubleDollarClose(
   return null
 }
 
+/**
+ * Recovers delimited-looking formulas the model forgot to wrap in `$`.
+ *
+ * Only two shapes qualify, because both are unambiguous in prose:
+ * - a parenthesis-balanced run that contains TeX structure (`\ln`, `^`, `_`,
+ *   `\cdot`, …) — e.g. `((e^x)'=e^x)` or `(x^x=e^{x\ln x})`;
+ * - a whitespace-free run carrying a TeX command — e.g. `2^{3x}\ln2\cdot 3`.
+ *
+ * Everything else stays literal, so paths (`C:\Users`), snake_case names and
+ * ordinary parenthetical prose never turn into math. Returns null when no
+ * segment qualifies, letting the caller keep the plain text.
+ */
+private fun splitBareLatex(text: String): List<InlineLatexSegment>? {
+  val segments = mutableListOf<InlineLatexSegment>()
+  var literalStart = 0
+  var index = 0
+  while (index < text.length) {
+    val span = bareLatexSpanAt(text, index)
+    if (span == null) {
+      index += 1
+      continue
+    }
+    if (span.start > literalStart) {
+      segments += InlineLatexSegment.Text(text.substring(literalStart, span.start), literalStart, span.start)
+    }
+    segments +=
+      InlineLatexSegment.Math(
+        latex = text.substring(span.contentStart, span.contentEnd).trim(),
+        start = span.start,
+        end = span.end,
+      )
+    literalStart = span.end
+    index = span.end
+  }
+  if (segments.isEmpty()) return null
+  if (literalStart < text.length) {
+    segments += InlineLatexSegment.Text(text.substring(literalStart), literalStart, text.length)
+  }
+  return segments
+}
+
+private fun bareLatexSpanAt(
+  text: String,
+  index: Int,
+): InlineMathSpan? {
+  val open = text[index]
+  // Shape 1: a balanced parenthesis run.
+  if (open == '(') {
+    val close = matchingParen(text, index) ?: return null
+    val inner = text.substring(index + 1, close)
+    if (inner.length < 3 || '\n' in inner) return null
+    // Prose parentheses ("(see below)", "(注意)") carry no TeX structure; a real
+    // formula has a command or a super/subscript and no CJK prose.
+    if (inner.any { it.code in 0x3000..0x9FFF || it.code in 0xFF00..0xFFEF }) return null
+    if (!hasTexOperator(inner)) return null
+    if (countTexMarkers(inner) < 1) return null
+    return InlineMathSpan(index, index + 1, close, close + 1)
+  }
+  // Shape 2: a whitespace-free ASCII token carrying a TeX command, e.g.
+  // `2^{3x}\ln2\cdot 3` or `x^x=e^{x\ln x}`. CJK/punctuation breaks the token,
+  // and the token must contain a real command so a bare path stays literal.
+  if (open.isLetterOrDigit()) {
+    var end = index
+    while (end < text.length) {
+      val c = text[end]
+      if (c.isWhitespace() || c == '$' || c == '（' || c == '，' || c == '。' || c == '）') break
+      if (c.code in 0x3000..0x9FFF || c.code in 0xFF00..0xFFEF) break
+      end += 1
+    }
+    if (end - index < 4) return null
+    val token = text.substring(index, end)
+    if (!Regex("\\\\[a-zA-Z]{2,}").containsMatchIn(token)) return null
+    if (token.count { it == '\\' } == 0) return null
+    return InlineMathSpan(index, index, end, end)
+  }
+  return null
+}
+
+private fun matchingParen(
+  text: String,
+  open: Int,
+): Int? {
+  var depth = 0
+  var index = open
+  while (index < text.length) {
+    when (text[index]) {
+      '(' -> depth += 1
+      ')' -> {
+        depth -= 1
+        if (depth == 0) return index
+      }
+      '\n' -> return null
+    }
+    index += 1
+  }
+  return null
+}
+
+/** TeX-only markers: a backslash command, super/subscript, or a math operator. */
+private fun countTexMarkers(s: String): Int {
+  var markers = 0
+  var index = 0
+  while (index < s.length) {
+    when (s[index]) {
+      '\\' -> {
+        markers += 1
+        index += 2
+      }
+      '^', '_' -> {
+        markers += 1
+        index += 1
+      }
+      else -> index += 1
+    }
+  }
+  return markers
+}
+
+/** True when the run has a TeX command or a super/subscript — not just parens. */
+private fun hasTexOperator(s: String): Boolean =
+  s.contains('^') || s.contains('_') || Regex("\\\\[a-zA-Z]{2,}").containsMatchIn(s)
+
 private fun findCommandClose(
   text: String,
   from: Int,
   closeToken: String,
-): Int? {
-  var index = from
+): Int? {  var index = from
   while (index < text.length) {
     val char = text[index]
     if (char == '\n') return null
@@ -230,7 +358,7 @@ private fun findCommandClose(
 }
 
 private fun protectInlineMathInLine(line: String): String {
-  if (!containsInlineMath(line)) return line
+  if (!line.contains('\\') && !containsInlineMath(line)) return line
   val out = StringBuilder(line.length + 8)
   var index = 0
   while (index < line.length) {
@@ -275,6 +403,16 @@ private fun protectInlineMathInLine(line: String): String {
       out.append(line.substring(span.contentStart, span.contentEnd).replace("\\", "\\\\"))
       out.append(line, span.contentEnd, span.end)
       index = span.end
+      continue
+    }
+    // Bare TeX has no delimiters to keep, but its backslashes still must survive
+    // CommonMark, otherwise `\ln`/`\cdot` reach the TeX engine as plain letters.
+    val bare = bareLatexSpanAt(line, index)
+    if (bare != null) {
+      out.append(line, index, bare.contentStart)
+      out.append(line.substring(bare.contentStart, bare.contentEnd).replace("\\", "\\\\"))
+      out.append(line, bare.contentEnd, bare.end)
+      index = bare.end
       continue
     }
     out.append(line[index])

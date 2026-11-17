@@ -2,6 +2,8 @@ package ai.openclaw.app.ui.design
 
 import ai.openclaw.app.i18n.nativeString
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -21,19 +23,27 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.Backdrop
@@ -45,6 +55,9 @@ internal object ClawCircularButtonDefaults {
   val Elevation: Dp = 8.dp
   val RimElevation: Dp = 0.dp
   val GroupSpacing: Dp = 8.dp
+
+  /** Resting glass defocus; the turn pill animates around this value. */
+  val GlassBlur: Dp = 3.dp
 }
 
 /**
@@ -150,6 +163,135 @@ internal fun ClawJumpToLatestButton(
       icon = Icons.Default.ArrowDownward,
       contentDescription = nativeString("Jump to latest"),
       onClick = onClick,
+    )
+  }
+}
+
+private val TurnTopPillHeight = 30.dp
+private const val TurnTopPillSinkDp = 7f
+private const val TurnTopPillRiseDp = 10f
+private const val TurnTopPillBlurInDp = 10f
+private const val TurnTopPillBlurOutDp = 14f
+private const val TurnTopPillEnterMs = 240
+private const val TurnTopPillExitMs = 300
+private const val TurnTopPillExitHoldMs = 40
+
+/**
+ * Small glass label that offers to park the prompt of the turn being read back
+ * under the top bar. It is a hint, not a control: it shows up while the
+ * transcript is moving and leaves once reading settles.
+ *
+ * The entrance sinks a few dp while its blur resolves. The exit holds for a beat
+ * and then defocuses and drifts up as a single dissolve. The motion layer only
+ * exists while the pill is moving, so a standing pill keeps no offscreen buffer
+ * of its own.
+ *
+ * Glass is sampled from the pane backdrop, exactly like the header controls, so
+ * the pill really refracts the transcript sliding underneath it.
+ */
+@Composable
+internal fun ClawTurnTopPill(
+  visible: Boolean,
+  label: String,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+  backdrop: Backdrop? = null,
+) {
+  val haptics = rememberClawHaptics()
+  val colors = ClawTheme.colors
+  val dark = colors.canvas.luminance() < 0.5f
+  val pressDrag = rememberClawPressDrag(glow = dark)
+  val progress = remember { Animatable(0f) }
+  var mounted by remember { mutableStateOf(visible) }
+  var exiting by remember { mutableStateOf(false) }
+  LaunchedEffect(visible) {
+    if (visible) {
+      exiting = false
+      mounted = true
+      progress.animateTo(
+        targetValue = 1f,
+        animationSpec = tween(durationMillis = TurnTopPillEnterMs, easing = FastOutSlowInEasing),
+      )
+    } else {
+      exiting = true
+      // Hold for a beat before dissolving: the old 170ms fade read as the pill
+      // being dropped rather than dismissed.
+      progress.animateTo(
+        targetValue = 0f,
+        animationSpec =
+          tween(
+            durationMillis = TurnTopPillExitMs,
+            delayMillis = TurnTopPillExitHoldMs,
+            easing = FastOutLinearInEasing,
+          ),
+      )
+      // Unmount at rest: a hidden pill must neither hit-test nor hold a layer.
+      mounted = false
+    }
+  }
+  if (!mounted) return
+  // Defocus the glass itself rather than stacking a second RenderEffect on the
+  // backdrop: nested layers abort libhwui on the emulator.
+  val glassBlur =
+    ClawCircularButtonDefaults.GlassBlur +
+      ((1f - progress.value) * (if (exiting) TurnTopPillBlurOutDp else TurnTopPillBlurInDp)).dp
+  val motion =
+    if (progress.value < 1f) {
+      val p = progress.value
+      val travel = (1f - p) * (if (exiting) TurnTopPillRiseDp else TurnTopPillSinkDp)
+      // Out: the glass keeps its body while it defocuses, so the tail is a
+      // dissolve rather than a flat fade. In: opacity follows the motion.
+      val alphaValue = if (exiting) p * p else p
+      val scale = if (exiting) 0.96f + 0.04f * p else 1f
+      Modifier.graphicsLayer {
+        alpha = alphaValue
+        // Starts above and sinks into place; the exit drifts back up.
+        translationY = -travel.dp.toPx()
+        scaleX = scale
+        scaleY = scale
+      }
+    } else {
+      Modifier
+    }
+  val shape = RoundedCornerShape(percent = 50)
+  Row(
+    modifier =
+      modifier
+        .then(motion)
+        .clawPressDrag(pressDrag)
+        .height(TurnTopPillHeight)
+        .shadow(
+          elevation = ClawCircularButtonDefaults.Elevation,
+          shape = shape,
+          ambientColor = Color.Black.copy(alpha = if (dark) 0.34f else 0.16f),
+          spotColor = Color.Black.copy(alpha = if (dark) 0.58f else 0.30f),
+          clip = false,
+        )
+        .clip(shape)
+        .clawLiquidButton(
+          backdrop = backdrop,
+          surface = colors.surfaceRaised,
+          dark = dark,
+          blurRadius = glassBlur,
+        )
+        .clickable(role = Role.Button) {
+          haptics.tap()
+          onClick()
+        }
+        .semantics {
+          role = Role.Button
+          contentDescription = label
+        }
+        .then(pressDrag.modifier)
+        .then(pressDrag.gestureModifier)
+        .padding(horizontal = 13.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Text(
+      text = label,
+      style = ClawTheme.type.captionSmall.copy(fontWeight = FontWeight.Medium),
+      color = colors.text,
+      maxLines = 1,
     )
   }
 }

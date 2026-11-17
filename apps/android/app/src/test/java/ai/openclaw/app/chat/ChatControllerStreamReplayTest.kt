@@ -421,8 +421,8 @@ class ChatControllerStreamReplayTest {
             assertEquals(currentSession, controller.sessionKey.value)
             assertEquals(0, controller.pendingRunCount.value)
             controller.handleGatewayEvent(
-              "agent",
-              """{"sessionKey":"$currentSession","stream":"assistant","data":{"text":"Current session output"}}""",
+              "chat",
+              """{"sessionKey":"$currentSession","seq":1,"state":"delta","deltaText":"Current session output","message":{"role":"assistant","content":[{"type":"text","text":"Current session output"}]}}""",
             )
             controller.handleGatewayEvent(
               "agent",
@@ -473,7 +473,7 @@ class ChatControllerStreamReplayTest {
 
   @Test
   @OptIn(ExperimentalCoroutinesApi::class)
-  fun agentReplaceUsesReplacementSemanticsForSnapshotsAndDeltas() =
+  fun chatReplaceUsesReplacementSemanticsForSnapshotsAndDeltas() =
     runTest {
       val gateway = ScriptedGateway(json)
       gateway.respondChatSend(status = "started")
@@ -481,27 +481,93 @@ class ChatControllerStreamReplayTest {
 
       assertTrue(controller.sendMessageAwaitAcceptance("Replace this", "off", emptyList()))
       val runId = requireNotNull(gateway.lastRunId)
-      controller.handleGatewayEvent(
-        "agent",
-        """{"sessionKey":"main","runId":"$runId","stream":"assistant","data":{"text":"first"}}""",
-      )
-      controller.handleGatewayEvent(
-        "agent",
-        """{"sessionKey":"main","runId":"$runId","stream":"assistant","data":{"delta":" second"}}""",
-      )
+      controller.handleGatewayEvent("chat", chatDeltaPayload("main", runId, 1, "first", "first"))
+      controller.handleGatewayEvent("chat", chatDeltaPayload("main", runId, 2, " second", "first second"))
       assertEquals("first second", controller.streamingAssistantText.value)
 
       controller.handleGatewayEvent(
-        "agent",
-        """{"sessionKey":"main","runId":"$runId","stream":"assistant","data":{"delta":"replacement","replace":true}}""",
+        "chat",
+        """{"sessionKey":"main","runId":"$runId","seq":3,"state":"delta","replace":true,"deltaText":"replacement","message":{"role":"assistant","content":[{"type":"text","text":"replacement"}]}}""",
       )
       assertEquals("replacement", controller.streamingAssistantText.value)
 
       controller.handleGatewayEvent(
-        "agent",
-        """{"sessionKey":"main","runId":"$runId","stream":"assistant","data":{"text":"","replace":true}}""",
+        "chat",
+        """{"sessionKey":"main","runId":"$runId","seq":4,"state":"delta","replace":true,"deltaText":""}""",
       )
       assertEquals("", controller.streamingAssistantText.value)
+    }
+
+  @Test
+  @OptIn(ExperimentalCoroutinesApi::class)
+  fun rawAgentAssistantTextCannotOverwriteProjectedChatStream() =
+    runTest {
+      val gateway = ScriptedGateway(json)
+      gateway.respondChatSend(status = "started")
+      val controller = loadController(gateway)
+
+      assertTrue(controller.sendMessageAwaitAcceptance("Keep merged text", "off", emptyList()))
+      val runId = requireNotNull(gateway.lastRunId)
+      controller.handleGatewayEvent(
+        "chat",
+        chatDeltaPayload("main", runId, 1, "Before tool\n\nAfter tool", "Before tool\n\nAfter tool"),
+      )
+      controller.handleGatewayEvent(
+        "agent",
+        """{"sessionKey":"main","runId":"$runId","seq":2,"stream":"assistant","data":{"text":"After tool"}}""",
+      )
+
+      assertEquals("Before tool\n\nAfter tool", controller.streamingAssistantText.value)
+    }
+
+  @Test
+  @OptIn(ExperimentalCoroutinesApi::class)
+  fun toolStartCapturesTheLivePhaseSnapshots() =
+    runTest {
+      withPendingRunReplay {
+        assertTrue(send("z-original"))
+        controller.handleGatewayEvent("chat", chatDeltaPayload("main", "z-original", 1, "Before", "Before"))
+        tool("z-original", "tool-1")
+
+        val checkpoint = controller.livePhaseCheckpoints.value.single()
+        assertEquals("tool-1", checkpoint.toolCallId)
+        assertEquals("Before", checkpoint.textSnapshot)
+      }
+    }
+
+  @Test
+  @OptIn(ExperimentalCoroutinesApi::class)
+  fun multiPartChatSnapshotKeepsEveryTextPart() =
+    runTest {
+      val gateway = ScriptedGateway(json)
+      gateway.respondChatSend(status = "started")
+      val controller = loadController(gateway)
+
+      assertTrue(controller.sendMessageAwaitAcceptance("Keep every part", "off", emptyList()))
+      val runId = requireNotNull(gateway.lastRunId)
+      controller.handleGatewayEvent(
+        "chat",
+        """{"sessionKey":"main","runId":"$runId","seq":1,"state":"delta","message":{"role":"assistant","content":[{"type":"text","text":"Before"},{"type":"toolCall","toolCallId":"tool-1"},{"type":"text","text":"After"}]}}""",
+      )
+
+      assertEquals("Before\nAfter", controller.streamingAssistantText.value)
+    }
+
+  @Test
+  @OptIn(ExperimentalCoroutinesApi::class)
+  fun cumulativeChatSnapshotHealsAMissedDelta() =
+    runTest {
+      val gateway = ScriptedGateway(json)
+      gateway.respondChatSend(status = "started")
+      val controller = loadController(gateway)
+
+      assertTrue(controller.sendMessageAwaitAcceptance("Heal the gap", "off", emptyList()))
+      val runId = requireNotNull(gateway.lastRunId)
+      controller.handleGatewayEvent("chat", chatDeltaPayload("main", runId, 1, "Hello", "Hello"))
+      // seq 2 was dropped; the next frame still carries the complete snapshot.
+      controller.handleGatewayEvent("chat", chatDeltaPayload("main", runId, 3, "world", "Hello world"))
+
+      assertEquals("Hello world", controller.streamingAssistantText.value)
     }
 
   @Test

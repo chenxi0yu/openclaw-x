@@ -18,6 +18,7 @@ import ai.openclaw.app.chat.ChatComposerOwner
 import ai.openclaw.app.chat.ChatController
 import ai.openclaw.app.chat.ChatDiffStat
 import ai.openclaw.app.chat.ChatFastMode
+import ai.openclaw.app.chat.ChatLivePhaseCheckpoint
 import ai.openclaw.app.chat.ChatMessage
 import ai.openclaw.app.chat.ChatMessageContent
 import ai.openclaw.app.chat.ChatMessageCost
@@ -87,6 +88,7 @@ import ai.openclaw.app.ui.design.ClawSecondaryButton
 import ai.openclaw.app.ui.design.ClawStatus
 import ai.openclaw.app.ui.design.ClawStatusPill
 import ai.openclaw.app.ui.design.ClawTheme
+import ai.openclaw.app.ui.design.ClawTurnTopPill
 import ai.openclaw.app.ui.design.LocalClawHazeState
 import ai.openclaw.app.ui.design.ProviderBrandIcon
 import ai.openclaw.app.ui.design.agentAvatarSource
@@ -225,6 +227,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -235,7 +238,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import dev.chrisbanes.haze.HazeState
@@ -257,7 +259,6 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -306,10 +307,6 @@ import androidx.window.layout.DisplayFeature
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.icon.MiuixIcons
@@ -450,8 +447,13 @@ internal fun ChatScreen(
   val gatewayAgents by viewModel.gatewayAgents.collectAsState()
   val thinkingLevel by viewModel.chatThinkingLevel.collectAsState()
   val thinkingLevelSelection by viewModel.chatThinkingLevelSelection.collectAsState()
-  val streamingAssistantText = rememberThrottledStreamText(viewModel.chatStreamingAssistantText)
-  val streamingThinkingText = rememberThrottledStreamText(viewModel.chatStreamingThinkingText)
+  // Stream snapshots stay unthrottled: the gateway already paces deltas at
+// ~75ms, and the live phase splitter must see the same text the controller
+// snapshotted when a tool started. A one-frame lag there duplicated or dropped
+// the pre-tool prose.
+  val streamingAssistantText by viewModel.chatStreamingAssistantText.collectAsState()
+  val streamingThinkingText by viewModel.chatStreamingThinkingText.collectAsState()
+  val livePhaseCheckpoints by viewModel.chatLivePhaseCheckpoints.collectAsState()
   var toolDetailSheet by remember { mutableStateOf<ToolActivityDetail?>(null) }
   val pendingToolCalls by viewModel.chatPendingToolCalls.collectAsState()
   val subagentActivities by viewModel.chatSubagentActivities.collectAsState()
@@ -1217,6 +1219,7 @@ internal fun ChatScreen(
     questions = questionsForSession(questions, sessionKey, mainSessionKey, activeAgentId),
     streamingAssistantText = streamingAssistantText,
     streamingThinkingText = streamingThinkingText,
+    livePhaseCheckpoints = livePhaseCheckpoints,
     onToolDetail = { detail -> toolDetailSheet = detail },
     healthOk = healthOk,
     gatewayOffline = gatewayOffline,
@@ -1255,6 +1258,40 @@ internal fun ChatScreen(
             attachments = result.editorAttachments.toPendingAttachments(),
           ),
         )
+      }
+    },
+    onRetryAssistantMessage = { entryId ->
+      val ownerSnapshot = composerOwner
+      scope.launch {
+        val result = viewModel.rewindChatAtEntry(entryId) ?: return@launch
+        if (!viewModel.isCurrentChatComposerOwner(ownerSnapshot)) return@launch
+        val text = result.editorText.orEmpty()
+        val attachments = result.editorAttachments.toPendingAttachments()
+        if (text.isBlank() && attachments.isEmpty()) return@launch
+        // Direct journaled send (the notification-reply path): the retry must not
+        // touch whatever draft the user is composing in the input bar.
+        val accepted =
+          viewModel.sendChatForOwnerAwaitAcceptance(
+            owner = ownerSnapshot,
+            message = text,
+            thinking = thinkingLevel,
+            attachments = attachments.map(PendingAttachment::toOutgoingAttachment),
+            idempotencyKey = UUID.randomUUID().toString(),
+          )
+        if (!accepted) {
+          // The rewind already removed the turn; a send that never journaled must
+          // not swallow its question — hand it back like a plain rewind would.
+          viewModel.setChatDraft(
+            ChatDraft(
+              text = text,
+              placement = ChatDraftPlacement.Replace,
+              owner = ownerSnapshot,
+              expectedExistingText = inputDrafts[ownerSnapshot].orEmpty(),
+              acceptsEmptyText = true,
+              attachments = attachments,
+            ),
+          )
+        }
       }
     },
     onForkMessage = { entryId ->
@@ -1311,6 +1348,7 @@ internal fun ChatScreen(
     composerStyle = composerBarStyle,
     composerBottomInset = simpleComposerBottomInset,
     hazeState = chatHazeState,
+    backdrop = chatBackdrop,
     overlay = {
       Box(Modifier.fillMaxSize()) {
         val selectedShareIds = shareSelection.orEmpty().intersect(shareSelectionCandidates)
@@ -2063,37 +2101,6 @@ private fun ChatHeader(
   }
 }
 
-/**
- * Gateway text deltas arrive far faster than the transcript can be rebuilt:
- * every delta used to invalidate the whole timeline, so a busy reply spent the
- * frame budget recomposing instead of animating — the typewriter stalled and
- * the text landed in lumps. Conflating down to one update per interval keeps
- * the text current without recomposing more than ~16 times a second.
- */
-@Composable
-private fun rememberThrottledStreamText(source: StateFlow<String?>): String? {
-  var shown by remember { mutableStateOf(source.value) }
-  // Collect into a single pending slot, then publish at most once per frame.
-  // StateFlow already conflates equal/latest values, so this avoids both a
-  // backlog and the old polling race that could miss a short-lived final chunk.
-  LaunchedEffect(source) {
-    var pending = source.value
-    val collector =
-      launch {
-        source.collect { latest -> pending = latest }
-      }
-    try {
-      while (currentCoroutineContext().isActive) {
-        withFrameNanos { }
-        if (pending != shown) shown = pending
-      }
-    } finally {
-      collector.cancel()
-    }
-  }
-  return shown
-}
-
 @Composable
 private fun ChatMessageList(
   sessionKey: String,
@@ -2114,6 +2121,7 @@ private fun ChatMessageList(
   questions: List<ChatQuestionPrompt>,
   streamingAssistantText: String?,
   streamingThinkingText: String?,
+  livePhaseCheckpoints: List<ChatLivePhaseCheckpoint> = emptyList(),
   onToolDetail: (ToolActivityDetail) -> Unit,
   healthOk: Boolean,
   gatewayOffline: Boolean,
@@ -2130,6 +2138,8 @@ private fun ChatMessageList(
   sessionActionsEnabled: Boolean,
   onRewindMessage: (String) -> Unit,
   onForkMessage: (String) -> Unit,
+  /** Retry under a finished reply: rewinds to the turn's user entry and resends it. */
+  onRetryAssistantMessage: (String) -> Unit,
   /** Checked message ids while the batch share picker is open; null while browsing. */
   shareSelection: Set<String>? = null,
   onEnterShareSelection: (selected: Set<String>, all: Set<String>) -> Unit = { _, _ -> },
@@ -2152,6 +2162,8 @@ private fun ChatMessageList(
   composerBottomInset: Dp = 10.dp,
   /** Backdrop long-press message menus blur. Published to the transcript. */
   hazeState: HazeState? = null,
+  /** Pane-wide glass source: the turn pill refracts the transcript behind it. */
+  backdrop: Backdrop? = null,
   /** Pane-wide layer above header and transcript: hosts the morph menu. */
   overlay: @Composable () -> Unit = {},
   /** The pane's shared morph surface, published to every slot below. */
@@ -2162,6 +2174,7 @@ private fun ChatMessageList(
   header: @Composable (Boolean, Boolean) -> Unit,
   composer: @Composable (Boolean, Boolean) -> Unit,
 ) {
+  var dismissedSkillNoticeKeys by remember(sessionKey) { mutableStateOf<Set<String>>(emptySet()) }
   val onShowThinkingDetail: (String) -> Unit = { text ->
     onToolDetail(
       ToolActivityDetail(
@@ -2174,14 +2187,41 @@ private fun ChatMessageList(
       )
     )
   }
+  val latestUserMessageIndex = messages.indexOfLast { it.role.trim().equals("user", ignoreCase = true) }
+  val latestAssistantMessageIndex =
+    messages.indexOfLast { message ->
+      message.role.trim().equals("assistant", ignoreCase = true) &&
+        message.content.any { part -> part.type == "text" && !part.text.isNullOrBlank() }
+    }
+  val awaitingAnswer =
+    latestUserMessageIndex >= 0 && latestAssistantMessageIndex <= latestUserMessageIndex
+  val workingSubagents = subagentActivities.values.any { it.isWorking }
+  var turnWorking by remember(sessionKey) { mutableStateOf(false) }
+  LaunchedEffect(awaitingAnswer, activeRunCount, workingSubagents) {
+    if (!awaitingAnswer) {
+      turnWorking = false
+      return@LaunchedEffect
+    }
+    if (activeRunCount > 0 || workingSubagents) {
+      turnWorking = true
+      return@LaunchedEffect
+    }
+    if (!turnWorking) return@LaunchedEffect
+    // The main run can yield to a subagent before the final answer lands. Keep
+    // one working row and one clock across that gap, with a bounded fallback.
+    delay(CHAT_TURN_WORKING_GRACE_MS)
+    if (awaitingAnswer && activeRunCount == 0 && !workingSubagents) turnWorking = false
+  }
   val baseTimeline =
-    remember(messages, activeRunCount, pendingToolCalls, subagentActivities, questions, streamingAssistantText, streamingThinkingText, outboxItems, recoveryOutboxItems) {
+    remember(messages, activeRunCount, pendingToolCalls, subagentActivities, questions, streamingAssistantText, streamingThinkingText, livePhaseCheckpoints, turnWorking, outboxItems, recoveryOutboxItems) {
       buildChatTimeline(
         messages = messages,
         pendingRunCount = activeRunCount,
         pendingToolCalls = pendingToolCalls,
         streamingAssistantText = streamingAssistantText,
         streamingThinkingText = streamingThinkingText,
+        livePhaseCheckpoints = livePhaseCheckpoints,
+        turnWorking = turnWorking,
         subagentActivities = subagentActivities,
         outboxItems = outboxItems,
         recoveryOutboxItems = recoveryOutboxItems,
@@ -2189,12 +2229,16 @@ private fun ChatMessageList(
       )
     }
   val context = LocalContext.current
-  val indicatorVisible = activeRunCount > 0
+  val indicatorVisible = activeRunCount > 0 || turnWorking
   val workingRunTracker = remember(sessionKey) { ChatWorkingRunTracker(sessionKey) }
+  // One clock per user turn: a main run yielding to a subagent must not restart
+  // the elapsed timer in the middle of the same agent loop.
+  val workingClockKey =
+    baseTimeline.latestUserMessageId?.let { "turn:$it" } ?: activeRunClockKey
   val workingRun =
     workingRunTracker.resolve(
       indicatorVisible = indicatorVisible,
-      clockKey = activeRunClockKey,
+      clockKey = workingClockKey,
       authoritativeRunId = activeRunId,
       nowElapsedMs = SystemClock.elapsedRealtime(),
       outputTokens = activeRunOutputTokens,
@@ -2224,35 +2268,39 @@ private fun ChatMessageList(
   // often is what made the transcript stutter mid-answer.
   val revealTracker = remember(sessionKey) { ChatChainRevealTracker() }
   val rowCount = timeline.items.size
+  // O(1) row signature: never deep-compare timeline.items on every streaming
+  // delta (that dropped frames and made the answer arrive in late chunks). The
+  // newest/oldest keys still catch a same-count live->history handoff.
+  val firstRowKey = timeline.items.firstOrNull()?.let(::chatTimelineItemKey)
+  val lastRowKey = timeline.items.lastOrNull()?.let(::chatTimelineItemKey)
   val revealKeys =
-    remember(sessionKey, rowCount) { revealTracker.animateKeys(timeline.items.map(::chatTimelineItemKey)) }
-  LaunchedEffect(sessionKey, rowCount) { revealTracker.mark(timeline.items.map(::chatTimelineItemKey)) }
+    remember(sessionKey, rowCount, firstRowKey, lastRowKey) {
+      revealTracker.animateKeys(timeline.items.map(::chatTimelineItemKey))
+    }
+  LaunchedEffect(sessionKey, rowCount, firstRowKey, lastRowKey) {
+    revealTracker.mark(timeline.items.map(::chatTimelineItemKey))
+  }
   // Which folded step groups the user has opened. Keyed by the fold's own key,
   // so it survives recomposition but resets when the session changes.
   val expandedSteps = remember(sessionKey) { mutableStateMapOf<String, Boolean>() }
-  // The answer arrives as one chunk, so the typewriter reveal lives here (per
-  // session) instead of inside a timeline row that may be replaced any frame.
-  val answerTypewriter = rememberChatAnswerTypewriter(sessionKey)
-  // "This answer just arrived" cannot be decided from the gateway timestamp
-  // alone: a long reasoning turn stamps the message when the turn starts, so by
-  // the time the body lands the timestamp is older than the freshness window and
-  // the reveal is silently skipped — the body then pops in as one block. Seeing
-  // a live body in this composition is the reliable handoff signal.
-  var liveAnswerObserved by remember(sessionKey) { mutableStateOf(false) }
-  LaunchedEffect(streamingAssistantText) {
-    if (!streamingAssistantText.isNullOrBlank()) liveAnswerObserved = true
-  }
-  val answerArrivedLive =
-    liveAnswerObserved &&
-      timeline.items.any {
-        it is ChatTimelineItem.Message && it.message.role.equals("assistant", ignoreCase = true)
-      }
-  val latestAssistantIndex =
-    timeline.items.indexOfFirst { item ->
-      item is ChatTimelineItem.Message &&
-        item.message.role.trim().equals("assistant", ignoreCase = true) &&
-        item.message.content.any { part -> part.type == "text" && !part.text.isNullOrBlank() }
+  val latestAssistantId =
+    timeline.items.firstNotNullOfOrNull { item ->
+      val message = (item as? ChatTimelineItem.Message)?.message ?: return@firstNotNullOfOrNull null
+      message
+        .takeIf { candidate ->
+          candidate.role.trim().equals("assistant", ignoreCase = true) &&
+            candidate.content.any { part -> part.type == "text" && !part.text.isNullOrBlank() }
+        }?.id
     }
+  // The final answer can land only as a persisted message (e.g. an agent loop
+  // that never streams a body). Keep the last live text so the handoff can tell
+  // an unseen answer from one the live row already showed.
+  var lastLiveAnswerText by remember(sessionKey) { mutableStateOf("") }
+  LaunchedEffect(streamingAssistantText) {
+    if (!streamingAssistantText.isNullOrBlank()) lastLiveAnswerText = streamingAssistantText
+  }
+  val persistedRevealTracker = remember(sessionKey) { PersistedRevealTracker() }
+  persistedRevealTracker.observeActiveRun(activeRunCount)
   val readerScroll =
     rememberChatReaderScrollController(
       sessionKey = sessionKey,
@@ -2318,6 +2366,11 @@ private fun ChatMessageList(
   // The same surface is published downward as the pane's morph host, so the
   // composer's ＋ and model menus and a long-pressed message claim it instead of
   // each owning an overlay they would then have to position themselves.
+  // The turn pill is hosted outside ChatPaneLayout (see the call below): a
+  // backdrop consumer must never sit inside the layer it samples, or libhwui
+  // recurses while preparing the render tree and aborts. The layout still owns
+  // the header measurement, so its transcript slot publishes the reserve up.
+  var turnTopReserve by remember { mutableStateOf(0.dp) }
   CompositionLocalProvider(LocalClawMorphMenuHost provides morphHost) {
     Box(modifier = modifier) {
     ChatPaneLayout(
@@ -2337,6 +2390,7 @@ private fun ChatMessageList(
     status = conversationStatus,
     composer = { compact, tabletop -> composer(compact, tabletop) },
     transcript = { headerReserve ->
+      SideEffect { turnTopReserve = headerReserve }
       CompositionLocalProvider(
         LocalChatReaderNavigation provides readerScroll.navigation,
         // Long-press menus are launched from deep inside the rows; publishing
@@ -2354,6 +2408,7 @@ private fun ChatMessageList(
           catalogRevision = gatewayCatalogRevision,
           prepareRead = prepareFullMessageRead,
         ) { visibleContent, disclosure ->
+          Box(modifier = Modifier.fillMaxSize()) {
           Box(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             LazyColumn(
               modifier = Modifier.fillMaxSize().nestedScroll(readerScroll.nestedScrollConnection).onGloballyPositioned(readerScroll.navigation.anchors::viewportPlaced),
@@ -2403,14 +2458,6 @@ private fun ChatMessageList(
                 ChatReaderItem(revealKey) {
                   when (item) {
                     is ChatTimelineItem.Message -> {
-                      // reverseLayout puts the newest row at index 0. The typewriter is
-                      // always handed to the latest assistant bubble so the reveal
-                      // continues seamlessly across the live->persisted handoff; only an
-                      // answer that just arrived animates - history never replays.
-                      val isLatestAssistant = index == latestAssistantIndex
-                      val typingAnswer =
-                        isLatestAssistant &&
-                          (chatAnswerIsFresh(item.message.timestampMs) || answerArrivedLive)
                       // Selection keys are server-side transcript ids (entryId):
                       // the create endpoint has never heard of the client-local
                       // ChatMessage.id, and rows without an entryId cannot be shared.
@@ -2446,34 +2493,66 @@ private fun ChatMessageList(
                         onToggle = { shareEntryId?.let(onToggleShareSelection) },
                         testTag = "chat-share-select:${item.message.id}",
                       ) {
-                        ChatBubble(
-                          typewriter = answerTypewriter.takeIf { isLatestAssistant },
-                          typewriterAnimate = typingAnswer,
-                          messageId = item.message.id,
-                          entryId = item.message.entryId,
-                          role = item.message.role,
-                          live = false,
-                          content = visibleContent(item.message).filter { it.toolActivity == null },
-                          timestampMs = item.message.timestampMs.takeIf { item.showTimestamp },
-                          workDurationMs = item.workDurationMs,
-                          onQuoteMessage = onQuoteMessage,
-                          onQuoteLinkClick = { quote -> jumpToQuotedMessage(index, quote) },
-                          sessionActionsEnabled = sessionActionsEnabled,
-                          onRewindMessage = onRewindMessage,
-                          onForkMessage = onForkMessage,
-                          onShare = shareSeed,
-                          selectionActive = shareSelectionActive,
-                          speechState = speechState,
-                          onToggleListen = onToggleListen,
-                          inlineMediaPlaybackBlocked = inlineMediaPlaybackBlocked,
-                          inlineWidgetResolverReady = healthOk,
-                          resolveInlineWidgetResource = resolveInlineWidgetResource,
-                          loadImageArtifact = loadImageArtifact,
-                          loadMediaArtifact = loadMediaArtifact,
-                          senderLabel = item.message.senderLabel,
-                          disclosure = { disclosure(item.message) },
-                          onShowThinking = onShowThinkingDetail,
-                        )
+                        val messageRevealText =
+                          item.message.content
+                            .lastOrNull { part -> part.type == "text" && !part.text.isNullOrBlank() }
+                            ?.text
+                            .orEmpty()
+                        // An answer that only landed as a persisted row (never streamed)
+                        // gets the same short blur entrance; a streamed handoff stays
+                        // untouched so no shown text replays.
+                        val persistedEntrance =
+                          item.message.id == latestAssistantId &&
+                            persistedRevealTracker.shouldAnimateEntrance(
+                              id = item.message.id,
+                              activeRunCount = activeRunCount,
+                              lastLiveText = lastLiveAnswerText,
+                              text = messageRevealText,
+                            )
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                          ChatBubble(
+                            blockRevealKey = if (persistedEntrance) "message:${item.message.id}" else null,
+                            blockRevealAnimate = persistedEntrance,
+                            messageId = item.message.id,
+                            entryId = item.message.entryId,
+                            role = item.message.role,
+                            live = false,
+                            content = visibleContent(item.message).filter { it.toolActivity == null },
+                            timestampMs = item.message.timestampMs.takeIf { item.showTimestamp },
+                            workDurationMs = item.workDurationMs,
+                            onQuoteMessage = onQuoteMessage,
+                            onQuoteLinkClick = { quote -> jumpToQuotedMessage(index, quote) },
+                            sessionActionsEnabled = sessionActionsEnabled,
+                            onRewindMessage = onRewindMessage,
+                            onForkMessage = onForkMessage,
+                            onShare = shareSeed,
+                            selectionActive = shareSelectionActive,
+                            speechState = speechState,
+                            onToggleListen = onToggleListen,
+                            inlineMediaPlaybackBlocked = inlineMediaPlaybackBlocked,
+                            inlineWidgetResolverReady = healthOk,
+                            resolveInlineWidgetResource = resolveInlineWidgetResource,
+                            loadImageArtifact = loadImageArtifact,
+                            loadMediaArtifact = loadMediaArtifact,
+                            senderLabel = item.message.senderLabel,
+                            disclosure = { disclosure(item.message) },
+                            onShowThinking = onShowThinkingDetail,
+                          )
+                          // Every finished reply owns a persistent action bar, history rows
+                          // included; only the row that just landed plays the entrance.
+                          if (chatAssistantReplyContent(item) != null) {
+                            val retryEntryId = chatRetrySourceEntryId(timeline.items, index)
+                            ChatAssistantActionBar(
+                              messageId = item.message.id,
+                              copyText = chatMessagePlainText(visibleContent(item.message).filter { it.toolActivity == null }),
+                              onShare = shareSeed,
+                              retryEnabled = sessionActionsEnabled,
+                              onRetry = retryEntryId?.let { id -> { onRetryAssistantMessage(id) } },
+                              animateEntrance = animateReveal,
+                              pickerActive = shareSelectionActive,
+                            )
+                          }
+                        }
                       }
                     }
 
@@ -2559,15 +2638,27 @@ private fun ChatMessageList(
                     is ChatTimelineItem.SystemDivider -> {
                       ChatSystemDividerRow(item)
                     }
+                    is ChatTimelineItem.SkillLearnedNotice -> {
+                      if (item.key !in dismissedSkillNoticeKeys) {
+                        ChatSkillLearnedNoticeRow(
+                          item = item,
+                          onDismiss = {
+                            dismissedSkillNoticeKeys = dismissedSkillNoticeKeys + item.key
+                          },
+                        )
+                      }
+                    }
 
                     is ChatTimelineItem.StreamingAssistant -> {
                       ChatBubble(
-                        typewriter = answerTypewriter,
-                        typewriterAnimate = true,
+                        blockRevealKey = item.key,
+                        blockRevealAnimate = activeRunCount > 0 && item.liveTail,
                         messageId = null,
                         entryId = null,
                         role = "assistant",
-                        live = true,
+                        // Frozen phase segments are already complete; only the
+                        // current tail keeps the live caption and streaming parse.
+                        live = item.liveTail,
                         content = listOf(ChatMessageContent(text = item.text)),
                         timestampMs = null,
                         onQuoteMessage = onQuoteMessage,
@@ -2641,13 +2732,131 @@ private fun ChatMessageList(
                   .padding(bottom = chatComposerClearance(composerStyle, composerBottomInset)),
             )
           }
+          }
         }
       }
     },
     )
+    // Predicts "I want to re-read the start of this turn": while the transcript
+    // moves, a small pill hangs under the bar and parks the prompt that opened
+    // the turn at the top of the viewport right there. It is a sibling of the
+    // pane, in the same slot the morph menu uses, because its glass samples the
+    // pane backdrop and a consumer inside that captured layer aborts libhwui.
+    val turnTopScope = rememberCoroutineScope()
+    var turnTopArmed by remember(sessionKey) { mutableStateOf(false) }
+    var turnTopSuppressed by remember(sessionKey) { mutableStateOf(false) }
+    LaunchedEffect(readerScroll.scrolling) {
+      if (readerScroll.scrolling) {
+        // A jump we started ourselves must not bring the pill straight back.
+        if (!turnTopSuppressed) turnTopArmed = true
+      } else if (turnTopArmed) {
+        delay(CHAT_TURN_TOP_PILL_IDLE_MS)
+        turnTopArmed = false
+      }
+    }
+    // Two coordinate spaces: the pill is placed in pane space, where the bar's
+    // foot is reserve - 8dp, while the scroll target lives in transcript space,
+    // whose top edge sits the pane inset (10dp) lower. Both work out to the same
+    // line — 2dp under the bar — so the pill sits exactly where the prompt lands.
+    val turnTopPillTop = (turnTopReserve - 6.dp).coerceAtLeast(0.dp)
+    val turnTopPadding = (turnTopReserve - 16.dp).coerceAtLeast(0.dp)
+    val turnTopPx = with(density) { turnTopPadding.roundToPx() }
+    val turnTopTolerancePx = with(density) { 8.dp.roundToPx() }
+    // Streaming hands us a new item list per token; the derived block below must
+    // always read the latest one under a stable state object.
+    val turnTopItems by rememberUpdatedState(timeline.items)
+    // Plain Boolean, so a pixel-by-pixel scroll only recomposes when it flips.
+    val turnTopOffered by remember(readerScroll.listState, turnTopPx, turnTopTolerancePx) {
+      derivedStateOf {
+        chatTurnTopJump(
+          layout = readerScroll.listState.layoutInfo,
+          items = turnTopItems,
+          topPx = turnTopPx,
+          tolerancePx = turnTopTolerancePx,
+        )?.aligned == false
+      }
+    }
+    ClawTurnTopPill(
+      visible =
+        turnTopArmed &&
+          turnTopOffered &&
+          !turnTopSuppressed &&
+          !shareSelectionActive &&
+          !textSelection.active,
+      label = "定位到本消息顶部",
+      backdrop = backdrop,
+      onClick = {
+        val jump =
+          chatTurnTopJump(
+            layout = readerScroll.listState.layoutInfo,
+            items = timeline.items,
+            topPx = turnTopPx,
+            tolerancePx = turnTopTolerancePx,
+          )
+        if (jump != null) {
+          turnTopArmed = false
+          turnTopSuppressed = true
+          readerScroll.navigation.launch(turnTopScope) {
+            try {
+              readerScroll.listState.animateTurnTopJump(
+                anchorIndex = jump.anchorIndex,
+                scrollOffset = jump.scrollOffset,
+                topPx = turnTopPx,
+              )
+            } finally {
+              turnTopSuppressed = false
+            }
+          }
+        }
+      },
+      modifier =
+        Modifier
+          .align(Alignment.TopCenter)
+          .padding(top = turnTopPillTop),
+    )
     // Above every pane slot, including the header the capsule lives in.
     overlay()
     }
+  }
+}
+
+/** How long a turn stays visibly working while the main run yields to a subagent. */
+private const val CHAT_TURN_WORKING_GRACE_MS = 45_000L
+
+/** Reading stillness after which the "back to this turn's prompt" pill retires. */
+private const val CHAT_TURN_TOP_PILL_IDLE_MS = 2_500L
+
+/**
+ * Decides whether a newly persisted assistant message gets a one-shot blur
+ * entrance. Seeded history never animates; only a message that lands after a
+ * run this screen watched settles earns it, and only when the live row did not
+ * already show that body — a streamed handoff must never replay shown text.
+ */
+private class PersistedRevealTracker {
+  private var hadActiveRun = false
+  private val seen = HashSet<String>()
+  private var animatingId: String? = null
+
+  fun observeActiveRun(activeRunCount: Int) {
+    if (activeRunCount > 0) hadActiveRun = true
+  }
+
+  fun shouldAnimateEntrance(
+    id: String,
+    activeRunCount: Int,
+    lastLiveText: String,
+    text: String,
+  ): Boolean {
+    if (activeRunCount > 0) hadActiveRun = true
+    // The terminal/history message can land while the run is still settling;
+    // do not require activeRunCount == 0 or that final block never animates.
+    if (seen.add(id) && hadActiveRun && text.isNotBlank()) {
+      val shownLive =
+        lastLiveText.isNotEmpty() &&
+          (lastLiveText.contains(text) || text.startsWith(lastLiveText))
+      if (!shownLive) animatingId = id
+    }
+    return id == animatingId
   }
 }
 
@@ -2670,10 +2879,9 @@ internal class ChatWorkingRunTracker(
     nowElapsedMs: Long,
     outputTokens: Long?,
   ): ChatWorkingRun? {
-    if (!indicatorVisible) {
-      current = null
-      return null
-    }
+    // Retain the clock while the indicator is briefly hidden between the main
+    // run and a subagent answer; a same-turn reappearance must not reset to 1s.
+    if (!indicatorVisible) return null
     val resolvedClockKey = clockKey ?: "$sessionKey:active"
     val previous = current
     if (previous == null || previous.clockKey != resolvedClockKey) {
@@ -2870,8 +3078,9 @@ internal fun ChatBubble(
   workDurationMs: Long? = null,
   onShowThinking: (String) -> Unit = {},
   disclosure: @Composable () -> Unit = {},
-  typewriter: ChatAnswerTypewriter? = null,
-  typewriterAnimate: Boolean = false,
+  /** Keeps the block blur wrappers mounted for the live tail and frozen phases. */
+  blockRevealKey: String? = null,
+  blockRevealAnimate: Boolean = false,
 ) {
   val normalizedRole = role.trim().lowercase(Locale.US)
   val isUser = normalizedRole == "user"
@@ -2938,12 +3147,9 @@ internal fun ChatBubble(
     chatMessageDisplayText(renderedContent)
       .ifBlank { messageText }
       .trim()
-  // The newest answer types itself out after the gateway row lands; keep the menu out of the
-  // way while either the live row or the reveal still owns the text.
-  val typingText = renderedContent.lastOrNull { it.type == "text" }?.text.orEmpty()
-  val outputActive =
-    live ||
-      (typewriter != null && typewriterAnimate && typewriter.isRevealing(typingText))
+  // Live rows (including frozen phases, which have no message id yet) own their
+  // text until history settles; persisted rows never animate.
+  val outputActive = live || messageId == null
   val collapsibleUserText =
     shouldUseUserMessageDisclosure(isUser, renderedContent) && !textSelectionActive
   var userMessageExpanded by rememberSaveable(messageId, messageText) { mutableStateOf(false) }
@@ -3045,10 +3251,7 @@ internal fun ChatBubble(
                   onExpandedChange = { userMessageExpanded = it },
                 )
               }
-              // Only the trailing text block of a freshly arrived answer types itself out.
-              val typewriterPartIndex =
-                if (typewriter == null) -1 else renderedContent.indexOfLast { part -> part.type == "text" }
-              renderedContent.forEachIndexed { partIndex, part ->
+              renderedContent.forEach { part ->
                 when {
                   part.type == "thinking" -> {
                     ChatThinkingBlock(
@@ -3059,16 +3262,13 @@ internal fun ChatBubble(
                   }
 
                   part.type == "text" && !collapsibleUserText -> {
-                    val rawText = part.text.orEmpty()
-                    val typing = partIndex == typewriterPartIndex
-                    if (typing && typewriterAnimate) {
-                      LaunchedEffect(rawText, typewriterAnimate) { typewriter?.run(rawText, typewriterAnimate) }
-                    }
                     ChatText(
-                      text = if (typing && typewriterAnimate) checkNotNull(typewriter).visible(rawText, typewriterAnimate) else rawText,
+                      text = part.text.orEmpty(),
                       textColor = ClawTheme.colors.text,
                       isStreaming = live,
                       centered = isUser,
+                      blockRevealKey = blockRevealKey,
+                      blockRevealAnimate = blockRevealAnimate,
                     )
                   }
 
@@ -3193,11 +3393,20 @@ private fun chatTimelineRowSpacing(
 ): Dp =
   when {
     above == null -> 0.dp
+    // A new user prompt opens a turn: give it clear separation from the reply
+    // that precedes it, even when that reply ended in a chain row.
+    below.isUserMessageRow() -> 28.dp
     // Chain rows already carry 3.dp of their own vertical padding, so 0 here
     // leaves a ~6-7.dp gap - the same rhythm as the 4.dp between text lines.
     above.isChatChainRow() || below.isChatChainRow() -> 0.dp
     else -> 12.dp
   }
+
+/** True for a user prompt bubble (not an assistant row or a system notice). */
+private fun ChatTimelineItem.isUserMessageRow(): Boolean {
+  val message = (this as? ChatTimelineItem.Message)?.message ?: return false
+  return message.role.trim().equals("user", ignoreCase = true)
+}
 
 /** User bubbles are wide rounded rectangles, never full capsules. */
 internal const val CHAT_BUBBLE_CORNER_RADIUS_DP = 16
@@ -3316,6 +3525,8 @@ private fun ChatText(
   textColor: Color,
   isStreaming: Boolean,
   centered: Boolean = false,
+  blockRevealKey: String? = null,
+  blockRevealAnimate: Boolean = false,
 ) {
   ChatMarkdown(
     text = text,
@@ -3323,6 +3534,8 @@ private fun ChatText(
     isStreaming = isStreaming,
     bodyStyle = ClawTheme.type.body.copy(fontWeight = FontWeight.Normal),
     contentAlignment = if (centered) Alignment.CenterHorizontally else Alignment.Start,
+    blockRevealKey = blockRevealKey,
+    blockRevealAnimate = blockRevealAnimate,
   )
 }
 

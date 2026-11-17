@@ -1,6 +1,7 @@
 package ai.openclaw.app.ui.chat
 
 import ai.openclaw.app.chat.ChatDiffStat
+import ai.openclaw.app.chat.ChatLivePhaseCheckpoint
 import ai.openclaw.app.chat.ChatMessage
 import ai.openclaw.app.chat.ChatMessageContent
 import ai.openclaw.app.chat.ChatMessageProvenance
@@ -148,7 +149,7 @@ class ChatTimelineTest {
         streamingAssistantText = null,
       )
 
-    assertEquals(listOf("thinking", "message:user-1"), timeline.items.map(::chatTimelineItemKey))
+    assertEquals(listOf("thinking:live-waiting", "message:user-1"), timeline.items.map(::chatTimelineItemKey))
     assertEquals(1, timeline.readAnchorIndex)
     assertEquals(0, timeline.latestContentIndex)
     assertEquals("user-1", timeline.latestUserMessageId)
@@ -174,12 +175,141 @@ class ChatTimelineTest {
       )
 
     assertEquals(
-      listOf("stream", "tools", "thinking", "message:user-1", "message:assistant-1"),
+      listOf("stream", "tools", "message:user-1", "message:assistant-1"),
       timeline.items.map(::chatTimelineItemKey),
     )
-    assertEquals(3, timeline.readAnchorIndex)
+    assertEquals(2, timeline.readAnchorIndex)
     assertEquals(0, timeline.latestContentIndex)
     assertEquals("user-1", timeline.latestUserMessageId)
+  }
+
+  @Test
+  fun liveToolCheckpointKeepsProseAboveItsToolAndAnswerBelow() {
+    val user = textMessage(id = "user-1", role = "user", text = "go")
+    val tool =
+      ChatPendingToolCall(
+        toolCallId = "tool-1",
+        name = "read",
+        startedAtMs = 1000L,
+      )
+    val checkpoint =
+      ChatLivePhaseCheckpoint(
+        toolCallId = "tool-1",
+        textSnapshot = "Before tool",
+        thinkingSnapshot = "Thinking one",
+        startedAtMs = 1000L,
+      )
+
+    val timeline =
+      buildChatTimeline(
+        messages = listOf(user),
+        pendingRunCount = 1,
+        pendingToolCalls = listOf(tool),
+        streamingAssistantText = "Before tool\n\nAfter tool",
+        streamingThinkingText = "Thinking one\n\nThinking two",
+        livePhaseCheckpoints = listOf(checkpoint),
+      )
+
+    // reverseLayout: newest first. The full live order is
+    // Thinking one -> Before tool -> tool -> Thinking two -> After tool.
+    assertEquals(
+      listOf(
+        "stream:live:1",
+        "thinking:live-thinking:1",
+        "tools:tool-1",
+        "stream",
+        "thinking:live-current",
+        "message:user-1",
+      ),
+      timeline.items.map(::chatTimelineItemKey),
+    )
+    assertEquals(
+      listOf("After tool", "Before tool"),
+      timeline.items.mapNotNull { (it as? ChatTimelineItem.StreamingAssistant)?.text },
+    )
+  }
+
+  @Test
+  fun settledToolWithCheckpointStaysInterleavedInLiveBlockNotStackedAboveThinking() {
+    val user = textMessage(id = "user-1", role = "user", text = "go")
+    val persistedThinking =
+      ChatMessage(
+        id = "think-1",
+        role = "assistant",
+        content = listOf(ChatMessageContent(type = "thinking", text = "Thinking one")),
+        timestampMs = 1,
+      )
+    val persistedTool =
+      ChatMessage(
+        id = "call-1",
+        role = "assistant",
+        content = listOf(ChatMessageContent(type = "toolCall", toolActivity = ChatToolActivity("tool-1", "read", "path: a", null, false))),
+        timestampMs = 2,
+      )
+    val tool = ChatPendingToolCall(toolCallId = "tool-1", name = "read", startedAtMs = 1000L, done = true)
+    val checkpoint =
+      ChatLivePhaseCheckpoint(
+        toolCallId = "tool-1",
+        textSnapshot = "",
+        thinkingSnapshot = "Thinking one",
+        startedAtMs = 1000L,
+      )
+
+    val timeline =
+      buildChatTimeline(
+        messages = listOf(user, persistedThinking, persistedTool),
+        pendingRunCount = 1,
+        pendingToolCalls = listOf(tool),
+        streamingAssistantText = null,
+        streamingThinkingText = "Thinking one\n\nThinking two",
+        livePhaseCheckpoints = listOf(checkpoint),
+      )
+
+    // The transcript already owns a row for the settled call, but the live phase
+    // block must still render thinking -> tool -> thinking interleaved; the
+    // persisted copies are hidden, not stacked as a separate tools block.
+    assertEquals(
+      listOf(
+        "thinking:live-thinking:1",
+        "tools:tool-1",
+        "thinking:live-current",
+        "message:user-1",
+      ),
+      timeline.items.map(::chatTimelineItemKey),
+    )
+    assertTrue(timeline.items.none { it is ChatTimelineItem.CompletedTools })
+  }
+
+  @Test
+  fun liveCheckpointWithoutItsPendingToolKeepsProseVisible() {
+    val user = textMessage(id = "user-1", role = "user", text = "go")
+    val checkpoint =
+      ChatLivePhaseCheckpoint(
+        toolCallId = "tool-1",
+        textSnapshot = "Before tool",
+        thinkingSnapshot = "",
+        startedAtMs = 1000L,
+      )
+
+    val timeline =
+      buildChatTimeline(
+        messages = listOf(user),
+        pendingRunCount = 1,
+        pendingToolCalls = emptyList(),
+        streamingAssistantText = "Before tool\n\nAfter tool",
+        livePhaseCheckpoints = listOf(checkpoint),
+      )
+
+    // The checkpoint and pending-tool state arrive in separate emissions; the
+    // pre-tool prose must stay mounted while the tool row is still missing.
+    assertEquals(
+      listOf("stream:live:1", "stream", "message:user-1"),
+      timeline.items.map(::chatTimelineItemKey),
+    )
+    assertEquals(
+      listOf("After tool", "Before tool"),
+      timeline.items.mapNotNull { (it as? ChatTimelineItem.StreamingAssistant)?.text },
+    )
   }
 
   @Test

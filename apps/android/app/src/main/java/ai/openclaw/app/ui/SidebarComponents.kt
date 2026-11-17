@@ -10,6 +10,7 @@ import ai.openclaw.app.ui.design.ClawTheme
 import ai.openclaw.app.ui.design.rememberClawHaptics
 import ai.openclaw.app.ui.design.sessionColor
 import ai.openclaw.app.ui.design.sessionColorStripe
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -575,6 +576,7 @@ internal fun SidebarRowSurface(
   val haptics = rememberClawHaptics()
   val density = LocalDensity.current
   val rowTrigger = clawMorphTrigger(LocalClawMorphMenuHost.current)
+  val drillHost = LocalSidebarDrillHost.current
 
   /**
    * Long press condenses the row itself into the action card: the anchor is the
@@ -584,10 +586,13 @@ internal fun SidebarRowSurface(
   fun openRowMenu() {
     val bounds = rowTrigger.anchor ?: return
     val menu = menuContent ?: return
+    drillHost?.prepareOpen()
     val insetX = with(density) { 10.dp.roundToPx() }
     val insetY = with(density) { (-6).dp.roundToPx() }
     rowTrigger.open(
-      panelWidth = 200.dp,
+      // Wide enough for a label plus its current group on the right; the panel
+      // grows from the row's right edge, so the extra width lands to the right.
+      panelWidth = 248.dp,
       overrideAnchor =
         Rect(
           Offset(bounds.left + insetX, bounds.top + insetY),

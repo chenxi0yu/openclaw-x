@@ -111,9 +111,12 @@ internal fun pendingToolDetail(call: ChatPendingToolCall): ToolActivityDetail {
   val target =
     toolTargetOrName(call.label ?: toolTargetLabel(call.args, call.name), call.name)
       ?.take(TOOL_TARGET_MAX_CHARS)
+  // The gateway title already says what the call is doing; show it verbatim and
+  // fall back to the verb + command/path only when the gateway sent none.
+  val title = call.title?.trim()?.takeIf { it.isNotEmpty() }
   return ToolActivityDetail(
     key = call.toolCallId,
-    title = toolTitle(if (call.done) toolVerbDone(kind) else toolVerbInProgress(kind), target),
+    title = title ?: toolTitle(if (call.done) toolVerbDone(kind) else toolVerbInProgress(kind), target),
     kind = kind,
     target = target,
     detailText = call.args?.toString()?.take(TOOL_DETAIL_MAX_CHARS) ?: call.label,
@@ -131,9 +134,10 @@ internal fun completedToolDetail(
     toolTargetOrName(toolTargetLabel(tool.arguments, tool.name), tool.name)
       ?.take(TOOL_TARGET_MAX_CHARS)
   val result = completedToolResultPresentation(tool).output
+  val title = tool.title?.trim()?.takeIf { it.isNotEmpty() }
   return ToolActivityDetail(
     key = tool.toolCallId ?: "${tool.name}:${tool.detail.orEmpty().hashCode()}",
-    title = toolTitle(if (running) toolVerbInProgress(kind) else toolVerbDone(kind), target),
+    title = title ?: toolTitle(if (running) toolVerbInProgress(kind) else toolVerbDone(kind), target),
     kind = kind,
     target = target,
     detailText = tool.detail?.take(TOOL_DETAIL_MAX_CHARS),

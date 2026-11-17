@@ -796,8 +796,8 @@ class ChatControllerReconnectRestoreTest {
       try {
         val clientRunId = requestSeen.await()
         controller.handleGatewayEvent(
-          "agent",
-          """{"sessionKey":"main","runId":"$clientRunId","seq":1,"stream":"assistant","data":{"text":"working"}}""",
+          "chat",
+          chatDeltaPayload("main", clientRunId, 1, "working", "working"),
         )
         controller.handleGatewayEvent(
           "sessions.changed",
@@ -1901,8 +1901,8 @@ class ChatControllerReconnectRestoreTest {
       )
       assertEquals("ours", controller.streamingAssistantText.value)
       controller.handleGatewayEvent(
-        "agent",
-        """{"sessionKey":"main","runId":"run-stale","seq":2,"stream":"assistant","data":{"text":"stale agent"}}""",
+        "chat",
+        chatDeltaPayload("main", "run-stale", 2, "stale agent", "stale agent"),
       )
       controller.handleGatewayEvent(
         "agent",
